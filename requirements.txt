@@ -1,1 +1,2 @@
 playwright>=1.40
+pytest>=8      # dev only: unit tests for the pure helpers
