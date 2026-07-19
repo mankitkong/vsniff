@@ -234,6 +234,13 @@ def match_source(sources, token):
     raise VsniffError(f"source name {token!r} not found (have: {names})")
 
 
+def filter_from(episodes, start):
+    """Keep only episodes numbered >= start (inclusive). start=None keeps all."""
+    if start is None:
+        return list(episodes)
+    return [e for e in episodes if e >= start]
+
+
 # --------------------------------------------------------------------------- #
 # Discovery orchestration (one browser session)
 # --------------------------------------------------------------------------- #
@@ -327,6 +334,8 @@ def main(argv=None):
                     help="episode number (auto-detected for supported sites)")
     ap.add_argument("--quality", default="WEBDL", help="quality tag (default WEBDL)")
     ap.add_argument("--source", help="chinaq: force a source by number (9) or name (ZYun)")
+    ap.add_argument("--from", dest="start", type=int,
+                    help="batch (--all) only: fetch episodes numbered N and above")
     ap.add_argument("--out", default=".",
                     help="output directory (default .); supports ~ and $VARS, "
                          "e.g. --out ~/Movies")
