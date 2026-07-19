@@ -125,6 +125,7 @@ def analyze_playlist(ctx, m3u8_url, referer):
 class GenericSite:
     """Fallback: sniff whatever the page plays; user supplies episode."""
     name = "generic"
+    supports_batch = False
 
     def matches(self, host):
         return True
@@ -142,6 +143,7 @@ class GenericSite:
 
 class ChinaqSite(GenericSite):
     name = "chinaq"
+    supports_batch = True
     SOURCE_RX = re.compile(
         r'#sid=(\d+)"[^>]*onclick="changeSid\(\'\d+\'\)"><strong>[^<]*</strong><small>([^<]*)</small>'
     )
@@ -152,6 +154,19 @@ class ChinaqSite(GenericSite):
     def episode(self, url):
         m = re.search(r"/video/\d+-(\d+)\.html", url)
         return int(m.group(1)) if m else None
+
+    def series_id(self, url):
+        m = re.search(r"/video/(\d+)-\d+\.html", url) \
+            or re.search(r"/voddetail/(\d+)\.html", url)
+        return int(m.group(1)) if m else None
+
+    def parse_episodes(self, html, series_id):
+        """Parse voddetail HTML -> {sid: {episode numbers}} for this series."""
+        rx = re.compile(rf"/video/{series_id}-(\d+)\.html#sid=(\d+)")
+        by_sid = {}
+        for ep, sid in rx.findall(html):
+            by_sid.setdefault(int(sid), set()).add(int(ep))
+        return by_sid
 
     def _sources(self, html):
         tabs = [(int(s), n.strip()) for s, n in self.SOURCE_RX.findall(html)]
@@ -241,9 +256,27 @@ def filter_from(episodes, start):
     return [e for e in episodes if e >= start]
 
 
+def available_episodes(by_sid):
+    """Sorted union of every episode number across all sources."""
+    eps = set()
+    for episodes in by_sid.values():
+        eps |= episodes
+    return sorted(eps)
+
+
 # --------------------------------------------------------------------------- #
 # Discovery orchestration (one browser session)
 # --------------------------------------------------------------------------- #
+def discover_with_session(adapter, page, ctx, url, user_source):
+    """Discover one stream using an already-open browser session.
+
+    Returns (source_label, m3u8_url, referer, resolution, duration).
+    """
+    label, m3u8, referer = adapter.discover(page, ctx, url, user_source)
+    resolution, duration = analyze_playlist(ctx, m3u8, referer)
+    return label, m3u8, referer, resolution, duration
+
+
 def discover_stream(url, user_source, show=False):
     """Return (adapter, source_label, m3u8, referer, resolution, duration)."""
     adapter = pick_adapter(url)
@@ -252,11 +285,85 @@ def discover_stream(url, user_source, show=False):
         ctx = browser.new_context(user_agent=UA)
         page = ctx.new_page()
         try:
-            label, m3u8, referer = adapter.discover(page, ctx, url, user_source)
-            resolution, duration = analyze_playlist(ctx, m3u8, referer)
+            label, m3u8, referer, resolution, duration = discover_with_session(
+                adapter, page, ctx, url, user_source)
             return adapter, label, m3u8, referer, resolution, duration
         finally:
             browser.close()
+
+
+def download_all(url, args):
+    """Download every available episode of a chinaq series into args.out.
+
+    Returns 0 on full success, 1 if any episode failed.
+    """
+    adapter = pick_adapter(url)
+    print(f"site: {adapter.name}")
+    if not getattr(adapter, "supports_batch", False):
+        raise VsniffError("--all is only supported for chinaq.net")
+
+    series_id = adapter.series_id(url)
+    if series_id is None:
+        raise VsniffError("could not parse the chinaq series id from the URL")
+
+    pr = urlparse(url)
+    origin = f"{pr.scheme}://{pr.netloc}"
+    hm = re.search(r"#sid=(\d+)", url)
+    preferred_sid = int(hm.group(1)) if hm else None
+
+    out_dir = expand_out_dir(args.out)
+    os.makedirs(out_dir, exist_ok=True)
+
+    downloaded, failed = [], []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=not args.show)
+        ctx = browser.new_context(user_agent=UA)
+        page = ctx.new_page()
+        try:
+            page.goto(f"{origin}/voddetail/{series_id}.html",
+                      wait_until="domcontentloaded", timeout=30000)
+            by_sid = adapter.parse_episodes(page.content(), series_id)
+            available = available_episodes(by_sid)
+            if not available:
+                raise VsniffError("no episodes found on the voddetail page")
+
+            wanted = filter_from(available, args.start)
+            have = existing_episodes(out_dir, args.series, args.season)
+            present = [e for e in wanted if e in have]
+            missing = [e for e in wanted if e not in have]
+            print(f"catalog: {len(available)} episodes; "
+                  f"{len(missing)} to download, {len(present)} already present")
+
+            for ep in missing:
+                try:
+                    if preferred_sid is not None and ep in by_sid.get(preferred_sid, set()):
+                        ep_url = f"{origin}/video/{series_id}-{ep}.html#sid={preferred_sid}"
+                    else:
+                        ep_url = f"{origin}/video/{series_id}-{ep}.html"
+                    print(f"episode {ep}: discovering...")
+                    label, m3u8, referer, resolution, duration = discover_with_session(
+                        adapter, page, ctx, ep_url, args.source)
+                    fname = build_filename(
+                        args.series, args.season, ep, args.quality, resolution)
+                    out_path = os.path.join(out_dir, fname)
+                    print(f"  -> {out_path}  (source={label}, {resolution})")
+                    download_stream(m3u8, referer, out_path, duration)
+                    downloaded.append(ep)
+                except Exception as e:
+                    # Continue-on-failure: a single episode failing (no working
+                    # source, ffmpeg error, or a browser/network error such as a
+                    # Playwright timeout) must not abort the rest of the batch.
+                    print(f"  episode {ep} failed: {e}", file=sys.stderr)
+                    failed.append(ep)
+        finally:
+            browser.close()
+
+    summary = (f"done: {len(downloaded)} downloaded, "
+               f"{len(present)} already present, {len(failed)} failed")
+    if failed:
+        summary += f" (episodes: {', '.join(str(e) for e in failed)})"
+    print(summary)
+    return 1 if failed else 0
 
 
 # --------------------------------------------------------------------------- #
@@ -314,6 +421,20 @@ def download_stream(m3u8, referer, out_path, duration=None):
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+def existing_episodes(out_dir, series, season):
+    """Episode numbers already present in out_dir as {series} - Sxx Exx - ... .mp4."""
+    if not os.path.isdir(out_dir):
+        return set()
+    prefix = f"{series} - S{season:02d}E"
+    rx = re.compile(re.escape(prefix) + r"(\d+) - .*\.mp4$")
+    found = set()
+    for name in os.listdir(out_dir):
+        m = rx.match(name)
+        if m:
+            found.add(int(m.group(1)))
+    return found
+
+
 def build_filename(series, season, episode, quality, resolution):
     return f"{series} - S{season:02d}E{episode:02d} - {quality} - {resolution}.mp4"
 
@@ -336,13 +457,26 @@ def main(argv=None):
     ap.add_argument("--source", help="chinaq: force a source by number (9) or name (ZYun)")
     ap.add_argument("--from", dest="start", type=int,
                     help="batch (--all) only: fetch episodes numbered N and above")
-    ap.add_argument("--out", default=".",
-                    help="output directory (default .); supports ~ and $VARS, "
-                         "e.g. --out ~/Movies")
+    ap.add_argument("--out", default=None,
+                    help="output directory (default . for single mode; "
+                         "REQUIRED with --all); supports ~ and $VARS, e.g. --out ~/Movies")
+    ap.add_argument("--all", action="store_true",
+                    help="download every available episode (chinaq only; requires --out)")
     ap.add_argument("--show", action="store_true", help="run the browser headful (debug)")
     args = ap.parse_args(argv)
 
     try:
+        if args.all:
+            if not args.out:
+                raise VsniffError(
+                    "--all requires --out (the library directory to sync into)")
+            if args.episode is not None:
+                print("note: --episode is ignored with --all "
+                      "(episodes come from the catalog)")
+            return download_all(args.url, args)
+
+        if args.start is not None:
+            print("note: --from is ignored without --all")
         adapter = pick_adapter(args.url)
         print(f"site: {adapter.name}")
 
@@ -358,7 +492,7 @@ def main(argv=None):
         dur_txt = _fmt_time(duration) if duration else "unknown"
         print(f"stream: source={label}  resolution={resolution}  length={dur_txt}")
 
-        out_dir = expand_out_dir(args.out)
+        out_dir = expand_out_dir(args.out or ".")
         os.makedirs(out_dir, exist_ok=True)
         fname = build_filename(args.series, args.season, episode, args.quality, resolution)
         out_path = os.path.join(out_dir, fname)
