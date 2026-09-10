@@ -17,11 +17,14 @@ you just provide --episode yourself.
         --series "Blossoms of Power" --source ZYun
 """
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
-from urllib.parse import urljoin, urlparse
+import urllib.request
+from functools import lru_cache
+from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit
 
 from playwright.sync_api import sync_playwright
 
@@ -66,6 +69,18 @@ def sniff_once(page, nav_url, timeout_ms=12000):
     masters = [h for h in hits
                if "master.m3u8" in h[0] or h[0].rstrip("/").endswith("/index.m3u8")]
     return (masters or hits)[0]
+
+
+def origin_of(url):
+    pr = urlparse(url)
+    return f"{pr.scheme}://{pr.netloc}"
+
+
+def encode_url(url):
+    """Percent-encode a URL path so ffmpeg/urllib accept non-ASCII paths."""
+    s = urlsplit(url)
+    return urlunsplit((s.scheme, s.netloc, quote(s.path, safe="/,.-_~%"),
+                       s.query, s.fragment))
 
 
 def fetch_text(ctx, url, referer):
@@ -183,6 +198,26 @@ class ChinaqSite(GenericSite):
             return [hash_sid] + [s for s in sids if s != hash_sid]
         return sids
 
+    def catalog(self, page, ctx, url):
+        """[(episode, episode_page_url)] for every episode of this series."""
+        series_id = self.series_id(url)
+        if series_id is None:
+            raise VsniffError("could not parse the chinaq series id from the URL")
+        origin = origin_of(url)
+        hm = re.search(r"#sid=(\d+)", url)
+        preferred_sid = int(hm.group(1)) if hm else None
+
+        page.goto(f"{origin}/voddetail/{series_id}.html",
+                  wait_until="domcontentloaded", timeout=30000)
+        by_sid = self.parse_episodes(page.content(), series_id)
+        items = []
+        for ep in available_episodes(by_sid):
+            ep_url = f"{origin}/video/{series_id}-{ep}.html"
+            if preferred_sid is not None and ep in by_sid.get(preferred_sid, set()):
+                ep_url += f"#sid={preferred_sid}"
+            items.append((ep, ep_url))
+        return items
+
     def discover(self, page, ctx, url, user_source):
         base = url.split("#")[0]
         hm = re.search(r"#sid=(\d+)", url)
@@ -201,21 +236,107 @@ class ChinaqSite(GenericSite):
         raise VsniffError("no working source found (all chinaq sources failed)")
 
 
+HK_EP_RX = re.compile(r"^\s*EP\s*#?\s*0*(\d+)", re.I)
+
+
+def hk_episode_numbers(labels):
+    """Episode number for each hkanime playlist label, in site order.
+
+    Labels are usually "EP01 <title>", but the site also carries movies with no
+    number at all, merged double episodes ("EP01-02 ..."), and series that open
+    part-way through a long run (One Piece starts at EP517). Trust the labels
+    only when every one parses into a strictly ascending run — otherwise they
+    can repeat, and two episodes would fight over one filename — and fall back
+    to the 1-based position in the list.
+    """
+    nums = []
+    for label in labels:
+        m = HK_EP_RX.match(label)
+        nums.append(int(m.group(1)) if m else None)
+    if None not in nums and all(a < b for a, b in zip(nums, nums[1:])):
+        return nums
+    return list(range(1, len(labels) + 1))
+
+
+@lru_cache(maxsize=8)
+def hk_playurl(origin, series_id):
+    """[(label, m3u8_url)] for an hkanime series, from its play-api JSON.
+
+    Cached: a batch run asks for the same series once per episode.
+    """
+    req = urllib.request.Request(
+        f"{origin}/play-api/{series_id}",
+        headers={"User-Agent": UA, "Referer": f"{origin}/"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode("utf-8", "replace"))
+    block = (data.get("playurl") or [{}])[0]
+    return [(label, encode_url(m3u8))
+            for label, m3u8 in block.items() if label.strip() and m3u8]
+
+
 class HKAnimeSite(GenericSite):
+    """hkanime is a single-page app: /play/<slug>/<seriesId>x<epIndex>.
+
+    Its /play-api/<seriesId> JSON is both the episode catalog and the source of
+    a playable master.m3u8 for every episode, so one request covers the whole
+    series and no per-episode sniffing is needed. Sniffing stays as a fallback
+    in case that endpoint changes.
+    """
     name = "hkanime"
+    supports_batch = True
+    URL_RX = re.compile(r"^(?P<prefix>.*/play/[^/]+)/(?P<sid>\d+)(?:x(?P<idx>\d+))?$")
 
     def matches(self, host):
         return host.endswith("hkanime.com")
 
-    def episode(self, url):
-        # /play/<slug>/<sourceId>x<index>  ; index is 0-based -> episode = index + 1
-        m = re.search(r"/play/[^/]+/\d+x(\d+)", url)
-        return int(m.group(1)) + 1 if m else None
+    def _parts(self, url):
+        """(url_prefix, series_id, ep_index); ids are None when unparseable."""
+        m = self.URL_RX.match(url.split("#")[0].split("?")[0].rstrip("/"))
+        if not m:
+            return None, None, None
+        idx = m.group("idx")
+        return (m.group("prefix"), int(m.group("sid")),
+                int(idx) if idx is not None else None)
 
-    # source is encoded in the URL (the N in NxM); generic sniff is enough
+    def series_id(self, url):
+        return self._parts(url)[1]
+
+    def _numbers(self, url, series_id):
+        return hk_episode_numbers(
+            [label for label, _ in hk_playurl(origin_of(url), series_id)])
+
+    def episode(self, url):
+        _prefix, series_id, idx = self._parts(url)
+        if series_id is None or idx is None:
+            return None
+        try:
+            nums = self._numbers(url, series_id)
+        except Exception:
+            return idx + 1  # API unreachable: assume a plain 1..N series
+        return nums[idx] if idx < len(nums) else None
+
+    def catalog(self, page, ctx, url):
+        """[(episode, episode_page_url)] for every episode of this series."""
+        prefix, series_id, _idx = self._parts(url)
+        if series_id is None:
+            raise VsniffError("could not parse the hkanime series id from the URL")
+        nums = self._numbers(url, series_id)
+        if not nums:
+            raise VsniffError("hkanime lists no episodes for this series")
+        return [(ep, f"{prefix}/{series_id}x{i}") for i, ep in enumerate(nums)]
+
     def discover(self, page, ctx, url, user_source):
         if user_source is not None:
             print("  note: --source is ignored for hkanime (source is in the URL)")
+        _prefix, series_id, idx = self._parts(url)
+        if series_id is not None and idx is not None:
+            try:
+                episodes = hk_playurl(origin_of(url), series_id)
+            except Exception as e:
+                print(f"  note: play-api unavailable ({e}); sniffing the page")
+                episodes = []
+            if idx < len(episodes):
+                return "hkanime", episodes[idx][1], url
         found = sniff_once(page, url)
         if not found:
             raise VsniffError("no stream found on the hkanime page")
@@ -293,39 +414,28 @@ def discover_stream(url, user_source, show=False):
 
 
 def download_all(url, args):
-    """Download every available episode of a chinaq series into args.out.
+    """Download every episode the site lists for a series into args.out.
 
     Returns 0 on full success, 1 if any episode failed.
     """
     adapter = pick_adapter(url)
     print(f"site: {adapter.name}")
-    if not getattr(adapter, "supports_batch", False):
-        raise VsniffError("--all is only supported for chinaq.net")
-
-    series_id = adapter.series_id(url)
-    if series_id is None:
-        raise VsniffError("could not parse the chinaq series id from the URL")
-
-    pr = urlparse(url)
-    origin = f"{pr.scheme}://{pr.netloc}"
-    hm = re.search(r"#sid=(\d+)", url)
-    preferred_sid = int(hm.group(1)) if hm else None
+    if not adapter.supports_batch:
+        raise VsniffError("--all is only supported for chinaq.net and hkanime.com")
 
     out_dir = expand_out_dir(args.out)
     os.makedirs(out_dir, exist_ok=True)
 
-    downloaded, failed = [], []
+    downloaded, failed, present = [], [], []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=not args.show)
         ctx = browser.new_context(user_agent=UA)
         page = ctx.new_page()
         try:
-            page.goto(f"{origin}/voddetail/{series_id}.html",
-                      wait_until="domcontentloaded", timeout=30000)
-            by_sid = adapter.parse_episodes(page.content(), series_id)
-            available = available_episodes(by_sid)
+            by_ep = dict(adapter.catalog(page, ctx, url))
+            available = sorted(by_ep)
             if not available:
-                raise VsniffError("no episodes found on the voddetail page")
+                raise VsniffError("no episodes found for this series")
 
             wanted = filter_from(available, args.start)
             have = existing_episodes(out_dir, args.series, args.season)
@@ -336,10 +446,7 @@ def download_all(url, args):
 
             for ep in missing:
                 try:
-                    if preferred_sid is not None and ep in by_sid.get(preferred_sid, set()):
-                        ep_url = f"{origin}/video/{series_id}-{ep}.html#sid={preferred_sid}"
-                    else:
-                        ep_url = f"{origin}/video/{series_id}-{ep}.html"
+                    ep_url = by_ep[ep]
                     print(f"episode {ep}: discovering...")
                     label, m3u8, referer, resolution, duration = discover_with_session(
                         adapter, page, ctx, ep_url, args.source)
@@ -461,7 +568,8 @@ def main(argv=None):
                     help="output directory (default . for single mode; "
                          "REQUIRED with --all); supports ~ and $VARS, e.g. --out ~/Movies")
     ap.add_argument("--all", action="store_true",
-                    help="download every available episode (chinaq only; requires --out)")
+                    help="download every available episode "
+                         "(chinaq/hkanime only; requires --out)")
     ap.add_argument("--show", action="store_true", help="run the browser headful (debug)")
     args = ap.parse_args(argv)
 

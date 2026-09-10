@@ -1,3 +1,5 @@
+import pytest
+
 import vsniff
 
 
@@ -63,7 +65,111 @@ def test_available_episodes_is_sorted_union():
 
 def test_supports_batch_flags():
     assert vsniff.ChinaqSite().supports_batch is True
+    assert vsniff.HKAnimeSite().supports_batch is True
     assert vsniff.GenericSite().supports_batch is False
+
+
+# ---- hkanime ------------------------------------------------------------- #
+HK_URL = "https://www.hkanime.com/play/%E7%99%BE%E8%AE%8A/145x1"
+
+
+def test_hk_parts_from_player_url():
+    s = vsniff.HKAnimeSite()
+    assert s._parts(HK_URL) == ("https://www.hkanime.com/play/%E7%99%BE%E8%AE%8A",
+                                145, 1)
+
+
+def test_hk_parts_from_detail_url_has_no_index():
+    s = vsniff.HKAnimeSite()
+    prefix, sid, idx = s._parts("https://www.hkanime.com/play/x/145")
+    assert (sid, idx) == (145, None)
+    assert prefix.endswith("/play/x")
+
+
+def test_hk_series_id_unknown_url_is_none():
+    assert vsniff.HKAnimeSite().series_id("https://www.hkanime.com/play") is None
+
+
+def test_hk_episode_numbers_uses_labels():
+    labels = ["EP01 a", "EP02 b", "EP03 c"]
+    assert vsniff.hk_episode_numbers(labels) == [1, 2, 3]
+
+
+def test_hk_episode_numbers_keeps_series_that_starts_late():
+    # One Piece [ViuTV] opens at EP517, so position is not the episode number.
+    labels = ["EP517 a", "EP518 b", "EP519 c"]
+    assert vsniff.hk_episode_numbers(labels) == [517, 518, 519]
+
+
+def test_hk_episode_numbers_keeps_merged_double_episodes():
+    labels = ["EP01-02 a", "EP03-04 b", "EP05-06 c"]
+    assert vsniff.hk_episode_numbers(labels) == [1, 3, 5]
+
+
+def test_hk_episode_numbers_falls_back_when_labels_repeat():
+    labels = ["EP01 a", "EP01 b", "EP02 c"]
+    assert vsniff.hk_episode_numbers(labels) == [1, 2, 3]
+
+
+def test_hk_episode_numbers_falls_back_when_a_label_has_no_number():
+    labels = ["EP01 a", "Movie b", "EP03 c"]
+    assert vsniff.hk_episode_numbers(labels) == [1, 2, 3]
+
+
+def test_hk_episode_numbers_falls_back_when_labels_go_backwards():
+    labels = ["EP03 a", "EP01 b"]
+    assert vsniff.hk_episode_numbers(labels) == [1, 2]
+
+
+def fake_playurl(monkeypatch, episodes):
+    monkeypatch.setattr(vsniff, "hk_playurl", lambda origin, sid: episodes)
+
+
+def test_hk_episode_reads_the_label_at_that_index(monkeypatch):
+    fake_playurl(monkeypatch, [("EP517 a", "u1"), ("EP518 b", "u2")])
+    assert vsniff.HKAnimeSite().episode(HK_URL) == 518
+
+
+def test_hk_episode_falls_back_to_index_when_api_fails(monkeypatch):
+    def boom(origin, sid):
+        raise OSError("no network")
+    monkeypatch.setattr(vsniff, "hk_playurl", boom)
+    assert vsniff.HKAnimeSite().episode(HK_URL) == 2
+
+
+def test_hk_episode_needs_an_index():
+    assert vsniff.HKAnimeSite().episode("https://www.hkanime.com/play/x/145") is None
+
+
+def test_hk_catalog_pairs_episodes_with_indexed_urls(monkeypatch):
+    fake_playurl(monkeypatch, [("EP01 a", "u1"), ("EP02 b", "u2")])
+    items = vsniff.HKAnimeSite().catalog(None, None, HK_URL)
+    prefix = "https://www.hkanime.com/play/%E7%99%BE%E8%AE%8A"
+    assert items == [(1, f"{prefix}/145x0"), (2, f"{prefix}/145x1")]
+
+
+def test_hk_catalog_rejects_a_series_with_no_episodes(monkeypatch):
+    fake_playurl(monkeypatch, [])
+    with pytest.raises(vsniff.VsniffError):
+        vsniff.HKAnimeSite().catalog(None, None, HK_URL)
+
+
+def test_hk_discover_uses_the_api_stream(monkeypatch):
+    fake_playurl(monkeypatch, [("EP01 a", "u1"), ("EP02 b", "u2")])
+    assert vsniff.HKAnimeSite().discover(None, None, HK_URL, None) == (
+        "hkanime", "u2", HK_URL)
+
+
+def test_hk_discover_sniffs_when_the_api_has_no_such_index(monkeypatch):
+    fake_playurl(monkeypatch, [("EP01 a", "u1")])
+    monkeypatch.setattr(vsniff, "sniff_once", lambda page, url: ("m", "r"))
+    assert vsniff.HKAnimeSite().discover(None, None, HK_URL, None) == (
+        "hkanime", "m", "r")
+
+
+def test_encode_url_percent_encodes_the_path():
+    got = vsniff.encode_url("https://cdn.example.com/動畫/01.mp4/master.m3u8")
+    assert got == ("https://cdn.example.com/%E5%8B%95%E7%95%AB/01.mp4/master.m3u8")
 
 
 def test_existing_episodes_matches_by_prefix(tmp_path):
@@ -107,9 +213,9 @@ def test_all_requires_out(capsys):
     assert "requires --out" in capsys.readouterr().err
 
 
-def test_all_rejects_non_chinaq(capsys):
+def test_all_rejects_a_site_without_a_catalog(capsys):
     rc = vsniff.main([
-        "https://www.hkanime.com/play/x/120x0",
+        "https://example.com/watch/123",
         "--series", "X", "--all", "--out", "."])
     assert rc == 1
-    assert "only supported for chinaq" in capsys.readouterr().err
+    assert "only supported for chinaq.net and hkanime.com" in capsys.readouterr().err

@@ -15,7 +15,7 @@ selection):
 | Site | Auto episode # | Notes |
 |------|:---:|-------|
 | **chinaq.net** | ✅ | tries each playback source until one works |
-| **hkanime.com** | ✅ | source is encoded in the URL |
+| **hkanime.com** | ✅ | episode list + streams come from its play-api |
 | **any other site** | — | works too; you supply `--episode` |
 
 ---
@@ -162,6 +162,8 @@ You'll see a live progress bar:
 | `--quality` | | `WEBDL` | Quality tag in the filename |
 | `--source` | | auto | **chinaq only:** force a source by number (`9`) or name (`ZYun`) |
 | `--out` | | `.` (here) | Folder to save into; supports `~` and `$VARS`, e.g. `--out ~/Movies` |
+| `--all` | | off | Download every episode of the series (chinaq/hkanime; needs `--out`) |
+| `--from` | | — | With `--all`: start at episode N and keep going |
 | `--show` | | off | Show the browser window (for debugging) |
 
 ### chinaq sources (`--source`)
@@ -173,28 +175,34 @@ named `BYun`, `ZYun`, …). Some are dead at any time.
   your URL first).
 - **Force one** → `--source 9` (number) or `--source ZYun` (name, any case).
 
-hkanime encodes its source in the URL (the `120` in `120x0`), so `--source`
-isn't needed there.
+hkanime has one stream per episode (its URL is `<seriesId>x<episodeIndex>` —
+`120x0` is the first episode of series 120), so `--source` isn't used there.
 
-### Downloading several episodes
+### Downloading a whole series (`--all`)
 
-Run it once per episode, changing the number in the URL:
+Point vsniff at *any* episode of the series and add `--all`. It reads the
+site's episode list, skips whatever is already in `--out`, and downloads the
+rest. One episode failing doesn't stop the others.
 
 ```bash
-# chinaq: 68261-7, 68261-8, 68261-9 ...
-for n in 7 8 9; do
-  ./.venv/bin/python vsniff.py \
-    "https://chinaq.net/video/68261-$n.html#sid=9" \
-    --series "Blossoms of Power" --season 1
-done
+# hkanime — every episode
+./.venv/bin/python vsniff.py \
+  "https://www.hkanime.com/play/鋼之鍊金術師FA/120x0" \
+  --series "Fullmetal Alchemist Brotherhood" --season 1 \
+  --all --out ~/Movies/FMAB
 
-# hkanime: 120x0, 120x1, 120x2 ...  (episode = index + 1)
-for i in 0 1 2; do
-  ./.venv/bin/python vsniff.py \
-    "https://www.hkanime.com/play/鋼之鍊金術師FA/120x$i" \
-    --series "Fullmetal Alchemist Brotherhood" --season 1
-done
+# chinaq — from episode 7 onwards, forcing a source
+./.venv/bin/python vsniff.py \
+  "https://chinaq.net/video/68261-7.html#sid=9" \
+  --series "Blossoms of Power" --all --from 7 --out ~/Movies/Blossoms
 ```
+
+`--out` is required with `--all`, and re-running the same command is safe: it
+picks up where it left off. Add `--from N` to skip everything before episode N.
+
+Episode numbers come from the site's own labels, so a series that starts
+part-way through a long run (hkanime's One Piece opens at EP517) is named
+`S01E517`, not `S01E01`.
 
 ---
 
