@@ -258,11 +258,31 @@ def test_existing_episodes_matches_by_prefix(tmp_path):
     (tmp_path / "Other Show - S01E01 - WEBDL - 1080p.mp4").write_text("x")
     (tmp_path / "Blossoms of Power - S02E05 - WEBDL - 1080p.mp4").write_text("x")
     found = vsniff.existing_episodes(str(tmp_path), "Blossoms of Power", 1)
-    assert found == {3, 7}
+    assert found == {
+        3: "Blossoms of Power - S01E03 - WEBDL - 1080p.mp4",
+        7: "Blossoms of Power - S01E07 - WEBDL - 720p.mp4",
+    }
+
+
+def test_existing_episodes_keeps_the_real_resolution_tag(tmp_path):
+    # a sidecar must be named after the file on disk, not a rebuilt name
+    (tmp_path / "Show - S01E01 - WEBDL - 480p.mp4").write_text("x")
+    found = vsniff.existing_episodes(str(tmp_path), "Show", 1)
+    assert found[1].endswith("480p.mp4")
 
 
 def test_existing_episodes_missing_dir_is_empty():
-    assert vsniff.existing_episodes("/no/such/dir", "X", 1) == set()
+    assert vsniff.existing_episodes("/no/such/dir", "X", 1) == {}
+
+
+def test_subtitle_sidecar_replaces_the_video_extension():
+    assert vsniff.subtitle_sidecar("/lib/Show - S01E01 - WEBDL - 1080p.mp4", "zh") == \
+        "/lib/Show - S01E01 - WEBDL - 1080p.zh.srt"
+
+
+def test_subtitle_sidecar_keeps_dots_inside_the_name():
+    assert vsniff.subtitle_sidecar("/lib/Dr. Show - S01E01 - WEBDL - 720p.mp4", "en") \
+        == "/lib/Dr. Show - S01E01 - WEBDL - 720p.en.srt"
 
 
 def test_discover_with_session_delegates(monkeypatch):

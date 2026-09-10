@@ -445,7 +445,7 @@ def download_all(url, args):
     out_dir = expand_out_dir(args.out)
     os.makedirs(out_dir, exist_ok=True)
 
-    downloaded, failed, present = [], [], []
+    downloaded, failed, present, subs_added = [], [], [], 0
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=not args.show)
         ctx = browser.new_context(user_agent=UA)
@@ -460,8 +460,12 @@ def download_all(url, args):
             have = existing_episodes(out_dir, args.series, args.season)
             present = [e for e in wanted if e in have]
             missing = [e for e in wanted if e not in have]
+            backfill = [e for e in present if not os.path.exists(
+                subtitle_sidecar(os.path.join(out_dir, have[e]), args.sub_lang))]
+            note = f", {len(backfill)} without subtitles" if backfill else ""
             print(f"catalog: {len(available)} episodes; "
-                  f"{len(missing)} to download, {len(present)} already present")
+                  f"{len(missing)} to download, {len(present)} already present"
+                  f"{note}")
 
             for ep in missing:
                 try:
@@ -484,11 +488,38 @@ def download_all(url, args):
                     # Playwright timeout) must not abort the rest of the batch.
                     print(f"  episode {ep} failed: {e}", file=sys.stderr)
                     failed.append(ep)
+
+            for ep in backfill:
+                print(f"episode {ep}: already downloaded, fetching subtitles...")
+                try:
+                    (_lbl, _m3u8, referer, _res, _dur,
+                     subtitles) = discover_with_session(
+                        adapter, page, ctx, by_ep[ep], args.source)
+                    if not subtitles:
+                        # Whether a series is packaged with a subtitle track is a
+                        # property of the series, not of one episode (checked
+                        # across 543 episodes of 5 series), so one miss means
+                        # there is nothing to find in any of them. Bail out rather
+                        # than re-discover hundreds of episodes to learn the same.
+                        print("  no subtitle track on this series; "
+                              "skipping the remaining episodes")
+                        break
+                    if save_subtitles(subtitles, referer,
+                                      os.path.join(out_dir, have[ep]),
+                                      args.sub_lang):
+                        subs_added += 1
+                except Exception as e:
+                    # A missing sidecar is cosmetic next to an intact video, so a
+                    # failure here is reported but does not fail the run.
+                    print(f"  episode {ep} subtitles failed: {e}", file=sys.stderr)
         finally:
             browser.close()
 
-    summary = (f"done: {len(downloaded)} downloaded, "
-               f"{len(present)} already present, {len(failed)} failed")
+    parts = [f"{len(downloaded)} downloaded", f"{len(present)} already present"]
+    if subs_added:
+        parts.append(f"{subs_added} subtitles backfilled")
+    parts.append(f"{len(failed)} failed")
+    summary = "done: " + ", ".join(parts)
     if failed:
         summary += f" (episodes: {', '.join(str(e) for e in failed)})"
     print(summary)
@@ -519,16 +550,22 @@ def _render_bar(done_s, total_s, width=32):
     sys.stdout.flush()
 
 
+def subtitle_sidecar(video_path, lang):
+    """Sidecar path for a video: `<video basename>.<lang>.srt`.
+
+    This is the naming Jellyfin scans for, so the track shows up beside the
+    video without touching the mp4 itself.
+    """
+    return f"{os.path.splitext(video_path)[0]}.{lang}.srt"
+
+
 def save_subtitles(sub_url, referer, video_path, lang):
     """Write an HLS subtitle rendition beside the video as a .srt sidecar.
-
-    Named `<video basename>.<lang>.srt`, which is the sidecar convention
-    Jellyfin scans for, so the track shows up without touching the mp4.
 
     Best effort: a broken or empty subtitle track is not worth failing a
     finished video download over, so this reports and returns None instead.
     """
-    out_path = f"{os.path.splitext(video_path)[0]}.{lang}.srt"
+    out_path = subtitle_sidecar(video_path, lang)
     proc = subprocess.run(
         ["ffmpeg", "-y", "-headers", _headers(referer), "-i", sub_url,
          "-c:s", "srt", "-loglevel", "error", out_path],
@@ -576,16 +613,21 @@ def download_stream(m3u8, referer, out_path, duration=None):
 # CLI
 # --------------------------------------------------------------------------- #
 def existing_episodes(out_dir, series, season):
-    """Episode numbers already present in out_dir as {series} - Sxx Exx - ... .mp4."""
+    """{episode: filename} already in out_dir as {series} - Sxx Exx - ... .mp4.
+
+    The filename is kept, not just the number, because a sidecar has to be
+    named after the file that is actually on disk — an episode grabbed earlier
+    may carry a different resolution tag than the one we would build today.
+    """
     if not os.path.isdir(out_dir):
-        return set()
+        return {}
     prefix = f"{series} - S{season:02d}E"
     rx = re.compile(re.escape(prefix) + r"(\d+) - .*\.mp4$")
-    found = set()
-    for name in os.listdir(out_dir):
+    found = {}
+    for name in sorted(os.listdir(out_dir)):
         m = rx.match(name)
         if m:
-            found.add(int(m.group(1)))
+            found[int(m.group(1))] = name
     return found
 
 

@@ -196,9 +196,15 @@ setup, and the `.mp4` itself is untouched. Change the language code with
 `--sub-lang` (e.g. `--sub-lang yue`).
 
 It's automatic and best effort: episodes with a subtitle track get a sidecar,
-episodes without one just download as before. If a video already exists in
-`--out`, `--all` skips it and won't go back to fetch a missing sidecar —
-delete the `.mp4` to re-fetch both.
+episodes without one just download as before.
+
+`--all` also **backfills** — an episode you already downloaded before subtitle
+support existed gets its sidecar fetched without re-downloading the video, so
+re-running the same command over an existing library is enough to fill the
+gaps. The sidecar is named after the file actually on disk, so an episode
+grabbed at a different resolution still pairs up. Series with no subtitle
+track are detected on the first episode and skipped, rather than re-checking
+every episode to learn the same thing.
 
 Which sites have them:
 
