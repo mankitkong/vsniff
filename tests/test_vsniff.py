@@ -1,3 +1,6 @@
+import os
+import subprocess
+
 import pytest
 
 import vsniff
@@ -167,6 +170,83 @@ def test_hk_discover_sniffs_when_the_api_has_no_such_index(monkeypatch):
         "hkanime", "m", "r")
 
 
+# ---- subtitles ----------------------------------------------------------- #
+MASTER_WITH_SUBS = """#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio0",NAME="yue",LANGUAGE="yue",URI="index-f2-a1.m3u8"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs0",NAME="粤語",LANGUAGE="yue",AUTOSELECT=YES,DEFAULT=YES,URI="index-f1.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1016128,RESOLUTION=1280x720,AUDIO="audio0",SUBTITLES="subs0"
+index-f2-v1.m3u8
+"""
+
+MASTER_NO_SUBS = """#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1759100,RESOLUTION=1280x720,AUDIO="audio0"
+index-f2-v1.m3u8
+"""
+
+
+def test_parse_subtitle_playlist_resolves_against_the_master_url():
+    got = vsniff.parse_subtitle_playlist(
+        MASTER_WITH_SUBS, "https://cdn.example.com/show/01/master.m3u8")
+    assert got == "https://cdn.example.com/show/01/index-f1.m3u8"
+
+
+def test_parse_subtitle_playlist_returns_none_without_a_subtitle_track():
+    assert vsniff.parse_subtitle_playlist(
+        MASTER_NO_SUBS, "https://cdn.example.com/show/01/master.m3u8") is None
+
+
+def test_parse_subtitle_playlist_ignores_the_audio_rendition_uri():
+    # the AUDIO line also carries a URI="..."; it must not be mistaken for subs
+    audio_only = MASTER_WITH_SUBS.replace("TYPE=SUBTITLES", "TYPE=CLOSED-CAPTIONS")
+    assert vsniff.parse_subtitle_playlist(audio_only, "https://x/master.m3u8") is None
+
+
+def fake_ffmpeg(monkeypatch, writes=None, returncode=0, stderr=""):
+    """Stand in for the ffmpeg subprocess, optionally writing output bytes."""
+    seen = {}
+
+    def run(cmd, capture_output=False, text=False):
+        seen["cmd"] = cmd
+        if writes is not None:
+            with open(cmd[-1], "w", encoding="utf-8") as fh:
+                fh.write(writes)
+        return subprocess.CompletedProcess(cmd, returncode, "", stderr)
+
+    monkeypatch.setattr(vsniff.subprocess, "run", run)
+    return seen
+
+
+def test_save_subtitles_names_the_sidecar_for_jellyfin(monkeypatch, tmp_path):
+    seen = fake_ffmpeg(monkeypatch, writes="1\n00:00:01,000 --> 00:00:02,000\nhi\n")
+    video = str(tmp_path / "Show - S01E01 - WEBDL - 1080p.mp4")
+    out = vsniff.save_subtitles("https://x/index-f1.m3u8", "https://ref/", video, "zh")
+    assert out == str(tmp_path / "Show - S01E01 - WEBDL - 1080p.zh.srt")
+    assert os.path.exists(out)
+    assert "https://x/index-f1.m3u8" in seen["cmd"]
+
+
+def test_save_subtitles_honours_the_language_code(monkeypatch, tmp_path):
+    fake_ffmpeg(monkeypatch, writes="1\n00:00:01,000 --> 00:00:02,000\nhi\n")
+    video = str(tmp_path / "Show - S01E01 - WEBDL - 1080p.mp4")
+    out = vsniff.save_subtitles("https://x/s.m3u8", "https://ref/", video, "yue")
+    assert out.endswith(".yue.srt")
+
+
+def test_save_subtitles_cleans_up_an_empty_result(monkeypatch, tmp_path, capsys):
+    fake_ffmpeg(monkeypatch, writes="", returncode=0)
+    video = str(tmp_path / "Show - S01E01 - WEBDL - 1080p.mp4")
+    assert vsniff.save_subtitles("https://x/s.m3u8", "https://ref/", video, "zh") is None
+    assert list(tmp_path.iterdir()) == []
+    assert "subtitles skipped" in capsys.readouterr().out
+
+
+def test_save_subtitles_survives_an_ffmpeg_failure(monkeypatch, tmp_path, capsys):
+    fake_ffmpeg(monkeypatch, writes=None, returncode=1, stderr="Server returned 404")
+    video = str(tmp_path / "Show - S01E01 - WEBDL - 1080p.mp4")
+    assert vsniff.save_subtitles("https://x/s.m3u8", "https://ref/", video, "zh") is None
+    assert "404" in capsys.readouterr().out
+
+
 def test_encode_url_percent_encodes_the_path():
     got = vsniff.encode_url("https://cdn.example.com/動畫/01.mp4/master.m3u8")
     assert got == ("https://cdn.example.com/%E5%8B%95%E7%95%AB/01.mp4/master.m3u8")
@@ -195,13 +275,14 @@ def test_discover_with_session_delegates(monkeypatch):
 
     def fake_analyze(ctx, m3u8, referer):
         calls["analyze"] = (m3u8, referer)
-        return ("1080p", 1416.0)
+        return ("1080p", 1416.0, "http://x/subs.m3u8")
 
     monkeypatch.setattr(vsniff, "analyze_playlist", fake_analyze)
     out = vsniff.discover_with_session(
         FakeAdapter(), page=None, ctx=None,
         url="http://x/video/1-2.html#sid=6", user_source=None)
-    assert out == ("SRC", "http://x/index.m3u8", "http://ref/", "1080p", 1416.0)
+    assert out == ("SRC", "http://x/index.m3u8", "http://ref/", "1080p", 1416.0,
+                   "http://x/subs.m3u8")
     assert calls["discover"] == ("http://x/video/1-2.html#sid=6", None)
     assert calls["analyze"] == ("http://x/index.m3u8", "http://ref/")
 

@@ -115,10 +115,30 @@ def parse_resolution(playlist_text, url=""):
     return "unknown"
 
 
+SUB_URI_RX = re.compile(r'URI="([^"]+)"')
+
+
+def parse_subtitle_playlist(playlist_text, m3u8_url):
+    """URL of a master playlist's subtitle rendition, or None if it has none.
+
+    Subtitles ride along as a separate WebVTT rendition, named by an
+    `#EXT-X-MEDIA:TYPE=SUBTITLES` line, which `ffmpeg -c copy` drops on the
+    floor. Reading that rendition on its own pulls only the .vtt segments —
+    and without the duplicate cues you get when reading it through the master.
+    """
+    for line in playlist_text.splitlines():
+        if line.startswith("#EXT-X-MEDIA:TYPE=SUBTITLES"):
+            m = SUB_URI_RX.search(line)
+            if m:
+                return urljoin(m3u8_url, m.group(1))
+    return None
+
+
 def analyze_playlist(ctx, m3u8_url, referer):
-    """Return (resolution_tag, duration_seconds_or_None) for a playlist URL."""
+    """Return (resolution_tag, duration_seconds_or_None, subtitle_url_or_None)."""
     text = fetch_text(ctx, m3u8_url, referer)
     resolution = parse_resolution(text, m3u8_url)
+    subtitles = parse_subtitle_playlist(text, m3u8_url)
 
     media_text, media_url = text, m3u8_url
     if "EXT-X-STREAM-INF" in text:  # master -> resolve first variant for durations
@@ -131,7 +151,7 @@ def analyze_playlist(ctx, m3u8_url, referer):
 
     secs = [float(s) for s in EXTINF_RX.findall(media_text)]
     duration = sum(secs) if secs else None
-    return resolution, duration
+    return resolution, duration, subtitles
 
 
 # --------------------------------------------------------------------------- #
@@ -391,24 +411,23 @@ def available_episodes(by_sid):
 def discover_with_session(adapter, page, ctx, url, user_source):
     """Discover one stream using an already-open browser session.
 
-    Returns (source_label, m3u8_url, referer, resolution, duration).
+    Returns (source_label, m3u8_url, referer, resolution, duration, subtitles).
     """
     label, m3u8, referer = adapter.discover(page, ctx, url, user_source)
-    resolution, duration = analyze_playlist(ctx, m3u8, referer)
-    return label, m3u8, referer, resolution, duration
+    resolution, duration, subtitles = analyze_playlist(ctx, m3u8, referer)
+    return label, m3u8, referer, resolution, duration, subtitles
 
 
 def discover_stream(url, user_source, show=False):
-    """Return (adapter, source_label, m3u8, referer, resolution, duration)."""
+    """Return (adapter,) + everything discover_with_session found."""
     adapter = pick_adapter(url)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=not show)
         ctx = browser.new_context(user_agent=UA)
         page = ctx.new_page()
         try:
-            label, m3u8, referer, resolution, duration = discover_with_session(
-                adapter, page, ctx, url, user_source)
-            return adapter, label, m3u8, referer, resolution, duration
+            found = discover_with_session(adapter, page, ctx, url, user_source)
+            return (adapter,) + found
         finally:
             browser.close()
 
@@ -448,13 +467,16 @@ def download_all(url, args):
                 try:
                     ep_url = by_ep[ep]
                     print(f"episode {ep}: discovering...")
-                    label, m3u8, referer, resolution, duration = discover_with_session(
+                    (label, m3u8, referer, resolution, duration,
+                     subtitles) = discover_with_session(
                         adapter, page, ctx, ep_url, args.source)
                     fname = build_filename(
                         args.series, args.season, ep, args.quality, resolution)
                     out_path = os.path.join(out_dir, fname)
                     print(f"  -> {out_path}  (source={label}, {resolution})")
                     download_stream(m3u8, referer, out_path, duration)
+                    if subtitles:
+                        save_subtitles(subtitles, referer, out_path, args.sub_lang)
                     downloaded.append(ep)
                 except Exception as e:
                     # Continue-on-failure: a single episode failing (no working
@@ -495,6 +517,31 @@ def _render_bar(done_s, total_s, width=32):
         line = f"\r  downloaded {_fmt_time(done_s)} (length unknown)"
     sys.stdout.write(line)
     sys.stdout.flush()
+
+
+def save_subtitles(sub_url, referer, video_path, lang):
+    """Write an HLS subtitle rendition beside the video as a .srt sidecar.
+
+    Named `<video basename>.<lang>.srt`, which is the sidecar convention
+    Jellyfin scans for, so the track shows up without touching the mp4.
+
+    Best effort: a broken or empty subtitle track is not worth failing a
+    finished video download over, so this reports and returns None instead.
+    """
+    out_path = f"{os.path.splitext(video_path)[0]}.{lang}.srt"
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-headers", _headers(referer), "-i", sub_url,
+         "-c:s", "srt", "-loglevel", "error", out_path],
+        capture_output=True, text=True)
+    size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+    if proc.returncode != 0 or size == 0:
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        reason = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "empty"
+        print(f"  subtitles skipped: {reason}")
+        return None
+    print(f"  subtitles -> {os.path.basename(out_path)}  ({size/1024:.0f} KB)")
+    return out_path
 
 
 def download_stream(m3u8, referer, out_path, duration=None):
@@ -570,6 +617,8 @@ def main(argv=None):
     ap.add_argument("--all", action="store_true",
                     help="download every available episode "
                          "(chinaq/hkanime only; requires --out)")
+    ap.add_argument("--sub-lang", dest="sub_lang", default="zh",
+                    help="language code for the .srt sidecar (default zh)")
     ap.add_argument("--show", action="store_true", help="run the browser headful (debug)")
     args = ap.parse_args(argv)
 
@@ -595,10 +644,12 @@ def main(argv=None):
                 f"pass it explicitly with --episode N")
 
         print("discovering stream...")
-        adapter, label, m3u8, referer, resolution, duration = discover_stream(
-            args.url, args.source, show=args.show)
+        (adapter, label, m3u8, referer, resolution, duration,
+         subtitles) = discover_stream(args.url, args.source, show=args.show)
         dur_txt = _fmt_time(duration) if duration else "unknown"
-        print(f"stream: source={label}  resolution={resolution}  length={dur_txt}")
+        subs_txt = "yes" if subtitles else "none"
+        print(f"stream: source={label}  resolution={resolution}  "
+              f"length={dur_txt}  subtitles={subs_txt}")
 
         out_dir = expand_out_dir(args.out or ".")
         os.makedirs(out_dir, exist_ok=True)
@@ -607,6 +658,8 @@ def main(argv=None):
 
         print(f"downloading -> {out_path}")
         size = download_stream(m3u8, referer, out_path, duration)
+        if subtitles:
+            save_subtitles(subtitles, referer, out_path, args.sub_lang)
         print(f"done: {out_path}  ({size/1024/1024:.1f} MB)")
         return 0
     except VsniffError as e:

@@ -164,6 +164,7 @@ You'll see a live progress bar:
 | `--out` | | `.` (here) | Folder to save into; supports `~` and `$VARS`, e.g. `--out ~/Movies` |
 | `--all` | | off | Download every episode of the series (chinaq/hkanime; needs `--out`) |
 | `--from` | | — | With `--all`: start at episode N and keep going |
+| `--sub-lang` | | `zh` | Language code for the `.srt` sidecar |
 | `--show` | | off | Show the browser window (for debugging) |
 
 ### chinaq sources (`--source`)
@@ -177,6 +178,34 @@ named `BYun`, `ZYun`, …). Some are dead at any time.
 
 hkanime has one stream per episode (its URL is `<seriesId>x<episodeIndex>` —
 `120x0` is the first episode of series 120), so `--source` isn't used there.
+
+### Subtitles
+
+Some streams carry subtitles as a separate track rather than burning them
+into the picture. `ffmpeg -c copy` throws that track away, so vsniff saves it
+alongside the video as a `.srt` file:
+
+```
+Ace of Diamond - S01E01 - WEBDL - 720p.mp4
+Ace of Diamond - S01E01 - WEBDL - 720p.zh.srt
+```
+
+This is the sidecar naming Jellyfin looks for (`<video name>.<language>.srt`),
+so the track appears in the subtitle menu after a library scan — no extra
+setup, and the `.mp4` itself is untouched. Change the language code with
+`--sub-lang` (e.g. `--sub-lang yue`).
+
+It's automatic and best effort: episodes with a subtitle track get a sidecar,
+episodes without one just download as before. If a video already exists in
+`--out`, `--all` skips it and won't go back to fetch a missing sidecar —
+delete the `.mp4` to re-fetch both.
+
+Which sites have them:
+
+| Site | Separate subtitle track? |
+|------|--------------------------|
+| **hkanime.com** | Sometimes — roughly 4 in 10 series carry one |
+| **chinaq.net** | No — subtitles are burned into the picture, so there's nothing to save |
 
 ### Downloading a whole series (`--all`)
 
