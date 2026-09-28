@@ -168,6 +168,13 @@ class GenericSite:
     def episode(self, url):
         return None  # unknown -> require --episode
 
+    def is_movie(self, url):
+        return False  # unknown -> only --movie turns movie naming on
+
+    def movie_url(self, url):
+        """The page to fetch a movie from; the URL itself unless the site bundles."""
+        return url
+
     def discover(self, page, ctx, url, user_source):
         """Return (source_label, m3u8_url, referer)."""
         found = sniff_once(page, url)
@@ -279,17 +286,22 @@ def hk_episode_numbers(labels):
 
 
 @lru_cache(maxsize=8)
-def hk_playurl(origin, series_id):
-    """[(label, m3u8_url)] for an hkanime series, from its play-api JSON.
+def hk_api(origin, series_id):
+    """The parsed play-api JSON for an hkanime entry.
 
-    Cached: a batch run asks for the same series once per episode.
+    Cached: a batch run asks for the same entry once per episode, and the movie
+    check and the episode list read the same response.
     """
     req = urllib.request.Request(
         f"{origin}/play-api/{series_id}",
         headers={"User-Agent": UA, "Referer": f"{origin}/"})
     with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read().decode("utf-8", "replace"))
-    block = (data.get("playurl") or [{}])[0]
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def hk_playurl(origin, series_id):
+    """[(label, m3u8_url)] for an hkanime entry, in site order."""
+    block = (hk_api(origin, series_id).get("playurl") or [{}])[0]
     return [(label, encode_url(m3u8))
             for label, m3u8 in block.items() if label.strip() and m3u8]
 
@@ -334,6 +346,37 @@ class HKAnimeSite(GenericSite):
         except Exception:
             return idx + 1  # API unreachable: assume a plain 1..N series
         return nums[idx] if idx < len(nums) else None
+
+    def is_movie(self, url):
+        """True for entries the site files as a movie (remarks "劇場版")."""
+        _prefix, series_id, _idx = self._parts(url)
+        if series_id is None:
+            return False
+        try:
+            info = (hk_api(origin_of(url), series_id).get("info") or [{}])[0]
+        except Exception:
+            return False  # can't tell -> keep series naming; --movie still works
+        return "劇場版" in (info.get("remarks") or "")
+
+    def movie_url(self, url):
+        """Pick the one video a movie entry holds.
+
+        Nearly every movie entry holds exactly one video, so a bare entry URL
+        (/play/<slug>/357) resolves to it. A few bundle several separate films
+        (all 13 Naruto movies in one entry), and each needs its own title and
+        year, so those must be picked by index rather than guessed at.
+        """
+        prefix, series_id, idx = self._parts(url)
+        if series_id is None or idx is not None:
+            return url
+        episodes = hk_playurl(origin_of(url), series_id)
+        if len(episodes) == 1:
+            return f"{prefix}/{series_id}x0"
+        listing = "\n".join(f"  {prefix}/{series_id}x{i}  {label.strip()}"
+                            for i, (label, _) in enumerate(episodes))
+        raise VsniffError(
+            f"this entry bundles {len(episodes)} separate movies; download each "
+            f"by its own URL with its own --title and --year:\n{listing}")
 
     def catalog(self, page, ctx, url):
         """[(episode, episode_page_url)] for every episode of this series."""
@@ -635,6 +678,76 @@ def build_filename(series, season, episode, quality, resolution):
     return f"{series} - S{season:02d}E{episode:02d} - {quality} - {resolution}.mp4"
 
 
+def movie_name(title, year):
+    """`Title (Year)` — Jellyfin's movie folder and file stem; year optional."""
+    return f"{title} ({year})" if year else title
+
+
+def build_movie_filename(title, year, quality, resolution):
+    return f"{movie_name(title, year)} - {quality} - {resolution}.mp4"
+
+
+def existing_movie(folder, title, year):
+    """Filename of a copy of this movie already in its folder, or None.
+
+    Matched by prefix, not rebuilt, because an earlier copy may carry a
+    different resolution tag than the stream serves today.
+    """
+    if not os.path.isdir(folder):
+        return None
+    prefix = f"{movie_name(title, year)} - "
+    for name in sorted(os.listdir(folder)):
+        if name.startswith(prefix) and name.endswith(".mp4"):
+            return name
+    return None
+
+
+def download_movie(adapter, args):
+    """Download one movie into `<out>/Title (Year)/Title (Year) - Q - RES.mp4`.
+
+    That per-movie folder is what a Jellyfin Movies library expects, so a movie
+    lands beside the series rather than being numbered into one. With --all it
+    syncs like a series: an existing copy is kept and only a missing subtitle
+    sidecar is fetched.
+    """
+    print(f"site: {adapter.name} (movie)")
+    if args.all and not args.out:
+        raise VsniffError("--all requires --out (the library directory to sync into)")
+    for flag, value in (("--episode", args.episode), ("--from", args.start)):
+        if value is not None:
+            print(f"note: {flag} is ignored for a movie")
+
+    url = adapter.movie_url(args.url)
+    folder = os.path.join(expand_out_dir(args.out or "."),
+                          movie_name(args.series, args.year))
+    have = existing_movie(folder, args.series, args.year) if args.all else None
+    if have and os.path.exists(subtitle_sidecar(os.path.join(folder, have), args.sub_lang)):
+        print(f"already present: {have}")
+        return 0
+
+    print("discovering stream...")
+    (_adapter, label, m3u8, referer, resolution, duration,
+     subtitles) = discover_stream(url, args.source, show=args.show)
+    if have:
+        print(f"already present: {have}")
+        if subtitles:
+            save_subtitles(subtitles, referer, os.path.join(folder, have), args.sub_lang)
+        return 0
+
+    dur_txt = _fmt_time(duration) if duration else "unknown"
+    print(f"stream: source={label}  resolution={resolution}  length={dur_txt}  "
+          f"subtitles={'yes' if subtitles else 'none'}")
+    os.makedirs(folder, exist_ok=True)
+    out_path = os.path.join(folder, build_movie_filename(
+        args.series, args.year, args.quality, resolution))
+    print(f"downloading -> {out_path}")
+    size = download_stream(m3u8, referer, out_path, duration)
+    if subtitles:
+        save_subtitles(subtitles, referer, out_path, args.sub_lang)
+    print(f"done: {out_path}  ({size/1024/1024:.1f} MB)")
+    return 0
+
+
 def expand_out_dir(path):
     """Resolve an output dir for macOS/Linux: expand ~ / ~user and $VARS."""
     return os.path.abspath(os.path.expanduser(os.path.expandvars(path)))
@@ -645,7 +758,8 @@ def main(argv=None):
         prog="vsniff",
         description="Sniff and download a streaming video as a Sonarr/Jellyfin-named MP4.")
     ap.add_argument("url", help="episode/play page URL")
-    ap.add_argument("--series", required=True, help="English series title")
+    ap.add_argument("--series", "--title", dest="series", required=True,
+                    help="English series (or movie) title")
     ap.add_argument("--season", type=int, default=1, help="season number (default 1)")
     ap.add_argument("--episode", type=int,
                     help="episode number (auto-detected for supported sites)")
@@ -661,10 +775,21 @@ def main(argv=None):
                          "(chinaq/hkanime only; requires --out)")
     ap.add_argument("--sub-lang", dest="sub_lang", default="zh",
                     help="language code for the .srt sidecar (default zh)")
+    ap.add_argument("--movie", action="store_true",
+                    help="name it as a movie, 'Title (Year)/Title (Year) - ...mp4' "
+                         "(automatic for hkanime 劇場版 entries)")
+    ap.add_argument("--year", type=int,
+                    help="movie release year, for the folder/filename")
     ap.add_argument("--show", action="store_true", help="run the browser headful (debug)")
     args = ap.parse_args(argv)
 
     try:
+        adapter = pick_adapter(args.url)
+        if args.movie or adapter.is_movie(args.url):
+            return download_movie(adapter, args)
+        if args.year is not None:
+            print("note: --year only applies to movies")
+
         if args.all:
             if not args.out:
                 raise VsniffError(
@@ -676,7 +801,6 @@ def main(argv=None):
 
         if args.start is not None:
             print("note: --from is ignored without --all")
-        adapter = pick_adapter(args.url)
         print(f"site: {adapter.name}")
 
         episode = args.episode if args.episode is not None else adapter.episode(args.url)

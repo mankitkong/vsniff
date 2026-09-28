@@ -320,3 +320,137 @@ def test_all_rejects_a_site_without_a_catalog(capsys):
         "--series", "X", "--all", "--out", "."])
     assert rc == 1
     assert "only supported for chinaq.net and hkanime.com" in capsys.readouterr().err
+
+
+# ---- movies -------------------------------------------------------------- #
+def test_movie_name_with_and_without_year():
+    assert vsniff.movie_name("Cardcaptor Sakura The Movie", 1999) == \
+        "Cardcaptor Sakura The Movie (1999)"
+    assert vsniff.movie_name("Cardcaptor Sakura The Movie", None) == \
+        "Cardcaptor Sakura The Movie"
+
+
+def test_build_movie_filename_has_no_episode_tag():
+    assert vsniff.build_movie_filename("CCS Movie", 1999, "WEBDL", "1080p") == \
+        "CCS Movie (1999) - WEBDL - 1080p.mp4"
+
+
+def test_existing_movie_matches_any_resolution(tmp_path):
+    (tmp_path / "CCS Movie (1999) - WEBDL - 480p.mp4").write_text("x")
+    (tmp_path / "CCS Movie (1999) - WEBDL - 480p.zh.srt").write_text("x")
+    assert vsniff.existing_movie(str(tmp_path), "CCS Movie", 1999) == \
+        "CCS Movie (1999) - WEBDL - 480p.mp4"
+
+
+def test_existing_movie_absent_or_missing_folder_is_none(tmp_path):
+    assert vsniff.existing_movie(str(tmp_path), "CCS Movie", 1999) is None
+    assert vsniff.existing_movie("/no/such/dir", "CCS Movie", 1999) is None
+
+
+def fake_api(monkeypatch, remarks, labels):
+    data = {"info": [{"name": "x", "remarks": remarks}],
+            "playurl": [{label: f"https://cdn/{i}.m3u8" for i, label in enumerate(labels)}]}
+    monkeypatch.setattr(vsniff, "hk_api", lambda origin, sid: data)
+
+
+def test_hk_is_movie_reads_the_site_tag(monkeypatch):
+    fake_api(monkeypatch, "劇場版", ["movie"])
+    assert vsniff.HKAnimeSite().is_movie(HK_URL) is True
+    fake_api(monkeypatch, "全集完 共22集", ["EP01 a"])
+    assert vsniff.HKAnimeSite().is_movie(HK_URL) is False
+
+
+def test_hk_is_movie_is_false_when_the_api_fails(monkeypatch):
+    def boom(origin, sid):
+        raise OSError("no network")
+    monkeypatch.setattr(vsniff, "hk_api", boom)
+    assert vsniff.HKAnimeSite().is_movie(HK_URL) is False
+
+
+def test_hk_movie_url_resolves_a_bare_single_video_entry(monkeypatch):
+    fake_api(monkeypatch, "劇場版", ["movie"])
+    got = vsniff.HKAnimeSite().movie_url("https://www.hkanime.com/play/x/357")
+    assert got == "https://www.hkanime.com/play/x/357x0"
+
+
+def test_hk_movie_url_keeps_an_explicit_index(monkeypatch):
+    fake_api(monkeypatch, "劇場版", ["a", "b", "c"])
+    url = "https://www.hkanime.com/play/x/338x2"
+    assert vsniff.HKAnimeSite().movie_url(url) == url
+
+
+def test_hk_movie_url_refuses_to_guess_inside_a_bundle(monkeypatch):
+    fake_api(monkeypatch, "劇場版", ["Film One", "Film Two", "Film Three"])
+    with pytest.raises(vsniff.VsniffError) as err:
+        vsniff.HKAnimeSite().movie_url("https://www.hkanime.com/play/x/338")
+    assert "3 separate movies" in str(err.value)
+    assert "338x2  Film Three" in str(err.value)
+
+
+def fake_movie_run(monkeypatch, subtitles="https://cdn/subs.m3u8"):
+    """Stub the network edges of a movie download; record what was asked for."""
+    calls = {"discover": 0, "download": [], "subs": []}
+
+    def discover(url, source, show=False):
+        calls["discover"] += 1
+        return (None, "hkanime", "https://cdn/m.m3u8", "https://ref/",
+                "1080p", 60.0, subtitles)
+
+    def download(m3u8, referer, out_path, duration=None):
+        calls["download"].append(out_path)
+        with open(out_path, "w") as fh:
+            fh.write("x" * 60_000)
+        return 60_000
+
+    def subs(sub_url, referer, video_path, lang):
+        calls["subs"].append(vsniff.subtitle_sidecar(video_path, lang))
+
+    monkeypatch.setattr(vsniff, "discover_stream", discover)
+    monkeypatch.setattr(vsniff, "download_stream", download)
+    monkeypatch.setattr(vsniff, "save_subtitles", subs)
+    return calls
+
+
+MOVIE_URL = "https://example.com/watch/ccs-movie"
+
+
+def test_movie_lands_in_its_own_folder(monkeypatch, tmp_path):
+    calls = fake_movie_run(monkeypatch)
+    rc = vsniff.main([MOVIE_URL, "--title", "CCS Movie", "--year", "1999",
+                      "--movie", "--out", str(tmp_path)])
+    assert rc == 0
+    folder = tmp_path / "CCS Movie (1999)"
+    assert calls["download"] == [str(folder / "CCS Movie (1999) - WEBDL - 1080p.mp4")]
+    assert calls["subs"] == [str(folder / "CCS Movie (1999) - WEBDL - 1080p.zh.srt")]
+
+
+def test_movie_all_skips_a_complete_copy_without_touching_the_network(
+        monkeypatch, tmp_path):
+    calls = fake_movie_run(monkeypatch)
+    folder = tmp_path / "CCS Movie (1999)"
+    folder.mkdir()
+    (folder / "CCS Movie (1999) - WEBDL - 720p.mp4").write_text("x")
+    (folder / "CCS Movie (1999) - WEBDL - 720p.zh.srt").write_text("x")
+    rc = vsniff.main([MOVIE_URL, "--title", "CCS Movie", "--year", "1999",
+                      "--movie", "--all", "--out", str(tmp_path)])
+    assert rc == 0
+    assert calls["discover"] == 0 and calls["download"] == []
+
+
+def test_movie_all_backfills_only_the_sidecar(monkeypatch, tmp_path):
+    calls = fake_movie_run(monkeypatch)
+    folder = tmp_path / "CCS Movie (1999)"
+    folder.mkdir()
+    (folder / "CCS Movie (1999) - WEBDL - 720p.mp4").write_text("x")
+    rc = vsniff.main([MOVIE_URL, "--title", "CCS Movie", "--year", "1999",
+                      "--movie", "--all", "--out", str(tmp_path)])
+    assert rc == 0
+    assert calls["download"] == []
+    assert calls["subs"] == [str(folder / "CCS Movie (1999) - WEBDL - 720p.zh.srt")]
+
+
+def test_movie_all_requires_out(monkeypatch, capsys):
+    fake_movie_run(monkeypatch)
+    rc = vsniff.main([MOVIE_URL, "--title", "X", "--movie", "--all"])
+    assert rc == 1
+    assert "requires --out" in capsys.readouterr().err

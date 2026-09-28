@@ -156,7 +156,7 @@ You'll see a live progress bar:
 | Option | Required? | Default | Meaning |
 |--------|-----------|---------|---------|
 | `url` | ✅ | — | The video page URL |
-| `--series` | ✅ | — | English show title (used in the filename) |
+| `--series` / `--title` | ✅ | — | English show or movie title (used in the filename) |
 | `--season` | | `1` | Season number |
 | `--episode` | | auto | Episode number (auto for chinaq/hkanime; required elsewhere) |
 | `--quality` | | `WEBDL` | Quality tag in the filename |
@@ -165,6 +165,8 @@ You'll see a live progress bar:
 | `--all` | | off | Download every episode of the series (chinaq/hkanime; needs `--out`) |
 | `--from` | | — | With `--all`: start at episode N and keep going |
 | `--sub-lang` | | `zh` | Language code for the `.srt` sidecar |
+| `--movie` | | auto | Name it as a movie (automatic for hkanime movie entries) |
+| `--year` | | — | Movie release year, used in the folder and filename |
 | `--show` | | off | Show the browser window (for debugging) |
 
 ### chinaq sources (`--source`)
@@ -178,6 +180,33 @@ named `BYun`, `ZYun`, …). Some are dead at any time.
 
 hkanime has one stream per episode (its URL is `<seriesId>x<episodeIndex>` —
 `120x0` is the first episode of series 120), so `--source` isn't used there.
+
+### Movies and specials
+
+hkanime lists a series' movies (劇場版) as their own entries, separate from the
+episodes. vsniff spots these automatically and names them as movies instead of
+numbering them into a season:
+
+```bash
+./.venv/bin/python vsniff.py \
+  "https://www.hkanime.com/play/百變小櫻 相約在香港 /357" \
+  --title "Cardcaptor Sakura The Movie" --year 1999 --out ~/media/movies
+```
+
+→ `~/media/movies/Cardcaptor Sakura The Movie (1999)/Cardcaptor Sakura The Movie (1999) - WEBDL - 720p.mp4`
+
+That per-movie folder is the layout a Jellyfin **Movies** library expects, so
+point `--out` at your Movies library root and each movie gets its own folder
+and proper movie metadata. The site doesn't publish release years, so pass
+`--year` yourself; it's optional but helps Jellyfin find the right film.
+
+- **Other sites:** add `--movie` to get the same naming anywhere.
+- **Bundles:** a couple of hkanime entries hold several separate films (e.g.
+  all the Naruto movies in one entry). vsniff won't guess which you mean; it
+  lists each film's URL so you can grab them one at a time, each with its own
+  `--title` and `--year`.
+- **`--all`** works on a movie too: it keeps a copy that's already there and
+  only fetches a missing subtitle file.
 
 ### Subtitles
 
