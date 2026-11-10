@@ -181,6 +181,12 @@ shows you choose are downloaded automatically. Settings → Indexers → + →
   season's pinned source. Tag a show (its Edit dialog → Tags → `vsniff`) to
   have new episodes downloaded through vsniff automatically.
 
+**3. The webhook** (optional, recommended) — Settings → Connect → + →
+**Webhook**: URL `http://vsniff-bridge:8990/sonarr/webhook?apikey=<api-key>`,
+method POST, triggers **On Series Add** and **On Series Delete** only. When
+you delete a show, the bridge forgets its pinned sources straight away (it
+would otherwise notice on its next RSS check); re-adding it later pins afresh.
+
 ### Limitations
 
 - **TV only** for now; Radarr (movies) isn't wired up yet.
@@ -639,6 +645,7 @@ page URL ─▶ [ browser: (try sources,) sniff the network ]
 | Searches are slow the first time | Each site is searched in several spellings, paced to avoid rate limits, and each source is probed once for its resolution. Results are cached, so repeats are quick. |
 | Sonarr imports nothing after "Completed" | The download folder must be the same path in both containers (see [Running it](#running-it-docker)). |
 | Wrong source pinned for a season | Grab the episode you want from interactive search; that source becomes the season's pin. Pins are listed on the status page. |
+| A deleted show still listed under pinned sources | Its pins go on the next RSS check (every 15 minutes), or immediately with the webhook set up. |
 
 ---
 

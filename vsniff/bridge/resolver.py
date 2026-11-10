@@ -124,11 +124,22 @@ class Resolver:
         return out
 
     def recent(self, per_pin=3) -> List[Release]:
-        """Newest episodes of every pinned season, for Sonarr's RSS sync."""
+        """Newest episodes of every pinned season, for Sonarr's RSS sync.
+
+        Also the backstop for pin cleanup: a pinned show Sonarr no longer has
+        (deleted while the webhook couldn't reach the bridge) loses its pins.
+        """
         out = []
         for pin in self.store.pins():
-            show = self.metadata.show(pin.tvdb_id)
-            if show is None or pin.season not in show.seasons:
+            try:
+                show = self.metadata.show(pin.tvdb_id)
+            except Exception as e:  # noqa: BLE001 - Sonarr unreachable: keep the pin
+                log.warning("couldn't check tvdb %s in Sonarr: %s", pin.tvdb_id, e)
+                continue
+            if show is None:
+                self.forget_show(pin.tvdb_id, "no longer in Sonarr")
+                continue
+            if pin.season not in show.seasons:
                 continue
             catalog = self._catalog(pin.entry_url)
             eps = [s - pin.episode_offset for s in sorted(catalog)]
@@ -186,6 +197,19 @@ class Resolver:
             return None
         scored.sort(key=lambda t: t[:3])
         return scored[0][3], scored[0][4]
+
+    def forget_show(self, tvdb_id, why):
+        """Drop a show's pins and cached details (deleted from Sonarr)."""
+        dropped = self.store.drop_pins(tvdb_id)
+        forget = getattr(self.metadata, "forget", None)
+        if forget:
+            forget(tvdb_id)
+        with self._lock:
+            for key in [k for k in self._candidates if k[0] == tvdb_id]:
+                del self._candidates[key]
+        if dropped:
+            log.info("dropped %d pin(s) for tvdb %s: %s", dropped, tvdb_id, why)
+        return dropped
 
     def repin(self, release: Release, reason="grabbed manually"):
         """Make a grabbed release's entry the season's source from now on."""

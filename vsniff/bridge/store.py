@@ -165,6 +165,11 @@ class Store:
         with self._tx() as db:
             db.execute("DELETE FROM pins WHERE tvdb_id=? AND season=?", (tvdb_id, season))
 
+    def drop_pins(self, tvdb_id) -> int:
+        """Forget every season's pin for a show; returns how many were dropped."""
+        with self._tx() as db:
+            return db.execute("DELETE FROM pins WHERE tvdb_id=?", (tvdb_id,)).rowcount
+
     # ---- releases ---- #
     def save_release(self, **fields) -> Release:
         """Insert or refresh a release, keeping its first_seen (RSS ordering)."""

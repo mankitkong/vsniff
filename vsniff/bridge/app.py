@@ -196,6 +196,26 @@ def create_app(cfg: Config, *, store: Store = None, resolver: Resolver = None,
                         headers={"Content-Disposition":
                                  f'attachment; filename="{release.id}.nzb"'})
 
+    @app.post("/sonarr/webhook")
+    async def sonarr_webhook(request: Request):
+        """Sonarr Connect > Webhook. On Series Delete, forget the show's pins."""
+        if not authorized(request.query_params):
+            return JSONResponse({"error": "API Key Incorrect"}, status_code=401)
+        try:
+            event = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "expected JSON"}, status_code=400)
+        kind = event.get("eventType")
+        tvdb_id = _int((event.get("series") or {}).get("tvdbId"))
+        if kind == "SeriesDelete" and tvdb_id:
+            dropped = resolver.forget_show(tvdb_id, "series deleted in Sonarr")
+            return {"ok": True, "dropped_pins": dropped}
+        if kind in ("SeriesAdd", "SeriesUpdate") and tvdb_id:  # pick up edits at once
+            forget = getattr(getattr(resolver, "metadata", None), "forget", None)
+            if forget:
+                forget(tvdb_id)
+        return {"ok": True}
+
     @app.get("/health")
     def health():
         return {"ok": True}

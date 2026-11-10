@@ -41,6 +41,10 @@ class FakeResolver:
     def repin(self, release):
         self.repinned.append(release.id)
 
+    def forget_show(self, tvdb_id, why):
+        self.forgotten = getattr(self, "forgotten", []) + [(tvdb_id, why)]
+        return 2
+
 
 @pytest.fixture
 def bridge(tmp_path):
@@ -231,3 +235,27 @@ def test_status_page_renders(bridge):
     grab(client)
     r = client.get("/")
     assert r.status_code == 200 and "Tigers Sniff the Rose S01E07" in r.text
+
+
+# ---- Sonarr webhook ------------------------------------------------------------ #
+def test_series_delete_webhook_forgets_the_show(bridge):
+    client, _store, resolver, _cfg = bridge
+    r = client.post("/sonarr/webhook", params={"apikey": KEY},
+                    json={"eventType": "SeriesDelete", "deletedFiles": False,
+                          "series": {"id": 66, "title": "When I Meet the Moon", "tvdbId": 461400}})
+    assert r.json() == {"ok": True, "dropped_pins": 2}
+    assert resolver.forgotten == [(461400, "series deleted in Sonarr")]
+
+
+def test_webhook_test_event_and_other_events_are_accepted(bridge):
+    client, _store, resolver, _cfg = bridge
+    assert client.post("/sonarr/webhook", params={"apikey": KEY},
+                       json={"eventType": "Test"}).json() == {"ok": True}
+    assert not hasattr(resolver, "forgotten")
+
+
+def test_webhook_needs_the_key(bridge):
+    client, *_ = bridge
+    r = client.post("/sonarr/webhook", json={"eventType": "SeriesDelete",
+                                             "series": {"tvdbId": 1}})
+    assert r.status_code == 401

@@ -210,3 +210,56 @@ def test_size_uses_sonarrs_episode_length_over_the_probe(tmp_path):
                         {DQ: eps(DQ, 35)}, {DQ: StreamInfo("GYun", "1080p", 82 * 60.0, False)})
     (r,) = Resolver(Store(str(tmp_path / "b.db")), FakeMetadata(show), access).releases(100, 1, 7)
     assert r.size == estimated_size("1080p", 45 * 60)
+
+
+# ---- forgetting deleted shows ---------------------------------------------------- #
+def test_forget_show_drops_every_pin_of_the_show(setup):
+    store, _access, resolver = setup
+    resolver.releases(100, 1, 7, mode="auto")
+    store.set_pin(100, 2, "dramasq", DQ, "尚公主", 0, "test")
+    store.set_pin(555, 1, "dramasq", DQ, "other", 0, "test")
+    assert resolver.forget_show(100, "deleted") == 2
+    assert [(p.tvdb_id, p.season) for p in store.pins()] == [(555, 1)]
+
+
+def test_rss_drops_pins_of_shows_sonarr_no_longer_has(setup):
+    store, _access, resolver = setup
+    store.set_pin(999, 1, "dramasq", DQ, "gone", 0, "test")  # FakeMetadata only knows 100
+    resolver.recent()
+    assert store.pin(999, 1) is None
+
+
+def test_rss_keeps_pins_when_sonarr_is_unreachable(setup):
+    store, _access, resolver = setup
+    store.set_pin(100, 1, "dramasq", DQ, "尚公主", 0, "test")
+
+    class Down:
+        def show(self, tvdb_id):
+            raise OSError("connection refused")
+
+    resolver.metadata = Down()
+    assert resolver.recent() == []
+    assert store.pin(100, 1) is not None
+
+
+def test_a_show_missing_from_sonarr_is_not_cached():
+    from vsniff.bridge.metadata import Metadata
+
+    class FakeSonarr:
+        def __init__(self):
+            self.series = None
+
+        def series_by_tvdb(self, tvdb_id):
+            return self.series
+
+        def episodes(self, series_id):
+            return [{"seasonNumber": 1, "episodeNumber": 1}]
+
+    sonarr = FakeSonarr()
+    md = Metadata(sonarr, None)
+    assert md.show(461400) is None
+    sonarr.series = {"id": 66, "title": "When I Meet the Moon", "year": 2026, "genres": []}
+    assert md.show(461400).title == "When I Meet the Moon"  # re-added: found at once
+    md.forget(461400)
+    sonarr.series = None
+    assert md.show(461400) is None

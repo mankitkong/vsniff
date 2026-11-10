@@ -111,14 +111,22 @@ class Metadata:
         self._lock = threading.Lock()
 
     def show(self, tvdb_id) -> Optional[Show]:
+        """The show, or None if Sonarr doesn't have it (that answer isn't cached,
+        so a show added a moment later is found right away)."""
         with self._lock:
             hit = self._cache.get(tvdb_id)
             if hit and time.monotonic() - hit[0] < CACHE_TTL:
                 return hit[1]
         show = self._build(tvdb_id)
-        with self._lock:
-            self._cache[tvdb_id] = (time.monotonic(), show)
+        if show is not None:
+            with self._lock:
+                self._cache[tvdb_id] = (time.monotonic(), show)
         return show
+
+    def forget(self, tvdb_id):
+        """Drop a cached show (it was deleted or edited in Sonarr)."""
+        with self._lock:
+            self._cache.pop(tvdb_id, None)
 
     def _build(self, tvdb_id) -> Optional[Show]:
         series = self.sonarr.series_by_tvdb(tvdb_id)
