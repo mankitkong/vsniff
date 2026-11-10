@@ -1,6 +1,8 @@
 import subprocess
 import urllib.request
 
+import pytest
+
 from vsniff import playlist
 
 
@@ -66,13 +68,13 @@ def fake_ffprobe(monkeypatch, stdout="", exc=None):
 
 
 def test_probe_resolution_reads_the_height_ffprobe_reports(monkeypatch):
-    seen = fake_ffprobe(monkeypatch, stdout="1080\n")
+    seen = fake_ffprobe(monkeypatch, stdout="1920,1080\n")
     assert playlist.probe_resolution("https://cdn/i.m3u8", "https://dramasq.io/x") == "1080p"
     assert "https://cdn/i.m3u8" in seen["cmd"]
 
 
 def test_probe_resolution_encodes_a_non_ascii_referer(monkeypatch):
-    seen = fake_ffprobe(monkeypatch, stdout="720\n")
+    seen = fake_ffprobe(monkeypatch, stdout="1280,720\n")
     playlist.probe_resolution("https://cdn/i.m3u8", "https://www.hkanime.com/play/信蜂/304x0")
     headers = seen["cmd"][seen["cmd"].index("-headers") + 1]
     assert "%E4%BF%A1%E8%9C%82" in headers
@@ -102,3 +104,26 @@ def test_analyze_playlist_skips_ffprobe_when_the_playlist_states_it(monkeypatch)
                         lambda url, ref: (_ for _ in ()).throw(AssertionError("probed")))
     assert playlist.analyze_playlist(None, "https://cdn/master.m3u8", "https://r/",
                                      keep_ads=True)[0] == "720p"
+
+
+@pytest.mark.parametrize("width, height, tag", [
+    (1920, 1080, "1080p"),
+    (1920, 800, "1080p"),   # widescreen drama (When I Meet the Moon): not 720p
+    (1920, 816, "1080p"),
+    (1280, 536, "720p"),
+    (1440, 1080, "1080p"),  # 4:3 keeps its height
+    (3840, 1600, "2160p"),
+    (854, 480, "480p"),
+])
+def test_frame_tag_judges_widescreen_by_width(width, height, tag):
+    assert playlist.frame_tag(width, height) == tag
+
+
+def test_probe_resolution_reports_a_widescreen_stream_as_1080p(monkeypatch):
+    fake_ffprobe(monkeypatch, stdout="1920,800\n")
+    assert playlist.probe_resolution("https://cdn/i.m3u8", "https://r/") == "1080p"
+
+
+def test_parse_resolution_judges_playlist_frames_by_width():
+    text = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1920x800\nv.m3u8\n"
+    assert playlist.parse_resolution(text) == "1080p"

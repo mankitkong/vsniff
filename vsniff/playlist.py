@@ -19,14 +19,25 @@ def _res_tag(height):
     return f"{height}p"
 
 
+def frame_tag(width, height):
+    """Resolution tag for a frame, judged like a 16:9 one of the same width.
+
+    Widescreen video is wider than 16:9, so its height alone undersells it:
+    a 1920x800 drama is 1080p (as Sonarr calls it), not 720p. A frame counts
+    as tall as a 16:9 frame of its width would be, or its real height if
+    that's more (4:3 1440x1080 stays 1080p).
+    """
+    return _res_tag(max(height, round(width * 9 / 16)))
+
+
 RESOLUTION_RX = re.compile(r"RESOLUTION=(\d+)x(\d+)")
 STD_HEIGHT_RX = re.compile(r"(?<!\d)(2160|1440|1080|720|480|360)(?!\d)")
 
 
 def parse_resolution(playlist_text, url=""):
-    heights = [int(h) for _w, h in RESOLUTION_RX.findall(playlist_text)]
-    if heights:
-        return _res_tag(max(heights))
+    frames = [(int(w), int(h)) for w, h in RESOLUTION_RX.findall(playlist_text)]
+    if frames:
+        return frame_tag(*max(frames, key=lambda f: f[0] * f[1]))
     marks = [int(x) for x in STD_HEIGHT_RX.findall(url)]
     if marks:
         return _res_tag(max(marks))
@@ -42,14 +53,14 @@ def probe_resolution(m3u8_url, referer):
     """
     cmd = ["ffprobe", "-v", "error", "-headers",
            f"Referer: {encode_url(referer)}\r\nUser-Agent: {UA}\r\n",
-           "-select_streams", "v:0", "-show_entries", "stream=height",
+           "-select_streams", "v:0", "-show_entries", "stream=width,height",
            "-of", "csv=p=0", m3u8_url]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout
     except (OSError, subprocess.TimeoutExpired):
         return "unknown"
-    heights = [int(x) for x in re.findall(r"\d+", out)]
-    return _res_tag(max(heights)) if heights else "unknown"
+    frames = [(int(w), int(h)) for w, h in re.findall(r"(\d+),(\d+)", out)]
+    return frame_tag(*max(frames, key=lambda f: f[0] * f[1])) if frames else "unknown"
 
 
 SUB_URI_RX = re.compile(r'URI="([^"]+)"')
