@@ -2,12 +2,13 @@
 ad-stripped copy to ffmpeg."""
 import itertools
 import re
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urljoin
 
 from .ads import EXTINF_RX, strip_ads
-from .common import fetch_text
+from .common import UA, encode_url, fetch_text
 
 
 # ---- resolution + duration from the playlist ------------------------------ #
@@ -30,6 +31,25 @@ def parse_resolution(playlist_text, url=""):
     if marks:
         return _res_tag(max(marks))
     return "unknown"
+
+
+def probe_resolution(m3u8_url, referer):
+    """Resolution tag read from the stream itself with ffprobe, or "unknown".
+
+    For a single-quality playlist that never states its RESOLUTION (common on
+    dramasq). ffprobe only opens the first segment, so this takes a second or
+    two, not a download.
+    """
+    cmd = ["ffprobe", "-v", "error", "-headers",
+           f"Referer: {encode_url(referer)}\r\nUser-Agent: {UA}\r\n",
+           "-select_streams", "v:0", "-show_entries", "stream=height",
+           "-of", "csv=p=0", m3u8_url]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    heights = [int(x) for x in re.findall(r"\d+", out)]
+    return _res_tag(max(heights)) if heights else "unknown"
 
 
 SUB_URI_RX = re.compile(r'URI="([^"]+)"')
@@ -59,6 +79,8 @@ def analyze_playlist(ctx, m3u8_url, referer, keep_ads=False):
     """
     text = fetch_text(ctx, m3u8_url, referer)
     resolution = parse_resolution(text, m3u8_url)
+    if resolution == "unknown" and text:
+        resolution = probe_resolution(m3u8_url, referer)
     subtitles = parse_subtitle_playlist(text, m3u8_url)
 
     media_text, media_url = text, m3u8_url

@@ -1,3 +1,4 @@
+import subprocess
 import urllib.request
 
 from vsniff import playlist
@@ -39,3 +40,65 @@ def test_serve_playlist_serves_the_text_over_http():
     assert url.startswith("http://127.0.0.1:")
     with urllib.request.urlopen(url, timeout=5) as resp:
         assert resp.read().decode() == "#EXTM3U\n#EXT-X-ENDLIST\n"
+
+
+MEDIA_NO_RESOLUTION = """#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXTINF:6.0,
+seg0.ts
+#EXTINF:4.0,
+seg1.ts
+#EXT-X-ENDLIST
+"""
+
+
+def fake_ffprobe(monkeypatch, stdout="", exc=None):
+    seen = {}
+
+    def run(cmd, capture_output=False, text=False, timeout=None):
+        seen["cmd"] = cmd
+        if exc:
+            raise exc
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    monkeypatch.setattr(playlist.subprocess, "run", run)
+    return seen
+
+
+def test_probe_resolution_reads_the_height_ffprobe_reports(monkeypatch):
+    seen = fake_ffprobe(monkeypatch, stdout="1080\n")
+    assert playlist.probe_resolution("https://cdn/i.m3u8", "https://dramasq.io/x") == "1080p"
+    assert "https://cdn/i.m3u8" in seen["cmd"]
+
+
+def test_probe_resolution_encodes_a_non_ascii_referer(monkeypatch):
+    seen = fake_ffprobe(monkeypatch, stdout="720\n")
+    playlist.probe_resolution("https://cdn/i.m3u8", "https://www.hkanime.com/play/信蜂/304x0")
+    headers = seen["cmd"][seen["cmd"].index("-headers") + 1]
+    assert "%E4%BF%A1%E8%9C%82" in headers
+
+
+def test_probe_resolution_is_unknown_when_ffprobe_finds_nothing(monkeypatch):
+    fake_ffprobe(monkeypatch, stdout="")
+    assert playlist.probe_resolution("https://cdn/i.m3u8", "https://r/") == "unknown"
+
+
+def test_probe_resolution_is_unknown_without_ffprobe(monkeypatch):
+    fake_ffprobe(monkeypatch, exc=FileNotFoundError("ffprobe"))
+    assert playlist.probe_resolution("https://cdn/i.m3u8", "https://r/") == "unknown"
+
+
+def test_analyze_playlist_falls_back_to_ffprobe_without_a_resolution_line(monkeypatch):
+    monkeypatch.setattr(playlist, "fetch_text", lambda ctx, url, ref: MEDIA_NO_RESOLUTION)
+    monkeypatch.setattr(playlist, "probe_resolution", lambda url, ref: "1080p")
+    resolution, duration, subs, pl = playlist.analyze_playlist(
+        None, "https://cdn/index.m3u8", "https://r/", keep_ads=True)
+    assert (resolution, duration, subs, pl) == ("1080p", 10.0, None, "https://cdn/index.m3u8")
+
+
+def test_analyze_playlist_skips_ffprobe_when_the_playlist_states_it(monkeypatch):
+    monkeypatch.setattr(playlist, "fetch_text", lambda ctx, url, ref: MASTER_NO_SUBS)
+    monkeypatch.setattr(playlist, "probe_resolution",
+                        lambda url, ref: (_ for _ in ()).throw(AssertionError("probed")))
+    assert playlist.analyze_playlist(None, "https://cdn/master.m3u8", "https://r/",
+                                     keep_ads=True)[0] == "720p"
