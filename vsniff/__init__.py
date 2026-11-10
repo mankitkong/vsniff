@@ -1,6 +1,9 @@
-"""vsniff — a general streaming-video sniffer + downloader.
+"""vsniff — streaming sites as a source for Sonarr.
 
-Drives a headless browser to *discover* the live video stream a page plays
+The Sonarr bridge (vsniff.bridge, run as `vsniff-bridge`) lets Sonarr search
+and download from Chinese streaming sites as if they were a usenet indexer and
+download client. Underneath, and from the `vsniff` command line, vsniff
+drives a headless browser to *discover* the live video stream a page plays
 (the stream URLs are usually hotlink-protected and tokened, so they must be
 captured from a real browser session), then hands the captured playlist +
 referer to ffmpeg to download and mux into a Sonarr/Jellyfin-named .mp4.
@@ -21,6 +24,7 @@ without an adapter still work — you just provide --episode yourself.
 From Python, see vsniff.api (search, and a Session for catalog/probe/download).
 
 Layout:
+    bridge/      the Sonarr bridge service (Newznab + SABnzbd endpoints)
     api          Python API: search; Session for catalog / probe / download
     cli          argument parsing; single, --all, movie and search flows
     discovery    find one stream in a browser session

@@ -5,16 +5,19 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vsniff"
 version = "0.2.0"
-description = "Sniff and download a streaming video as a Sonarr/Jellyfin-named MP4."
+description = "Streaming sites as a Sonarr source: a Newznab/SABnzbd bridge plus a downloader CLI that saves Sonarr/Jellyfin-named MP4s."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = ["playwright>=1.40"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]  # unit tests for the pure helpers
+# the Sonarr bridge service (vsniff-bridge)
+bridge = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9", "opencc>=1.1.9"]
+dev = ["pytest>=8", "httpx2>=2.0"]  # unit tests; httpx2 drives FastAPI's TestClient
 
 [project.scripts]
 vsniff = "vsniff.cli:main"
+vsniff-bridge = "vsniff.bridge.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["vsniff*"]

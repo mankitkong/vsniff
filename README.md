@@ -1,30 +1,186 @@
 # vsniff
 
-A general **streaming-video sniffer and downloader**. Point it at a video
-page and it captures whatever stream the page plays, downloads it in full
-quality, and saves a clean `.mp4` named the Sonarr/Jellyfin way:
+**Streaming sites as a source for Sonarr.** vsniff lets Sonarr find and
+download shows from Chinese streaming sites the same way it uses torrent and
+usenet indexers: they show up in Sonarr's searches, grabs download in the
+background, and finished episodes are imported into your library (and so into
+Jellyfin) like any other release.
 
 ```
 Fullmetal Alchemist Brotherhood - S01E01 - WEBDL - 1080p.mp4
 ```
 
-It works on any streaming page that plays HLS video in a browser. Three sites
-get extra polish (automatic episode numbers, whole-series downloads, search by
-title and, for chinaq and dramasq, source selection):
+There are two ways to use it:
+
+- **[The Sonarr bridge](#sonarr-bridge)** (the main one): a small service
+  Sonarr talks to as a Newznab indexer and a SABnzbd download client. It
+  matches Sonarr's shows to the sites by their Chinese titles and runs vsniff
+  for every episode Sonarr grabs.
+- **[The command line](#command-line-what-you-need)**: point it at a video
+  page and it downloads that episode (or the whole series) as a
+  Sonarr/Jellyfin-named `.mp4`. Handy for one-offs, and how vsniff started.
+
+Under the hood it captures whatever HLS stream a page plays in a real browser,
+so it works on any such page. Three sites get extra polish (automatic episode
+numbers, whole-series downloads, search by title — which is what lets Sonarr
+use them — and, for chinaq and dramasq, source selection):
 
 | Site | Auto episode # | Search | Notes |
 |------|:---:|:---:|-------|
 | **chinaq.net** | ✅ | ✅ | tries each playback source until one works; recent shows only |
 | **hkanime.com** | ✅ | ✅ | Cantonese-dubbed anime; episode list + streams come from its play-api |
-| **dramasq.io** | ✅ | ✅ | tries each playback source until one works; deep back catalogue; no browser needed |
-| **any other site** | — | — | works too; you supply `--episode` |
-
-Don't have the page URL yet? [`vsniff search`](#finding-a-show-vsniff-search)
-looks a title up on all three sites.
+| **dramasq.io** | ✅ | ✅ | tries each playback source until one works; deep back catalogue (anime too); no browser needed |
+| **any other site** | — | — | command line only; you supply `--episode` |
 
 ---
 
-## What you need
+## Sonarr bridge
+
+```
+            search (Newznab)                    title search, episode lists
+ Sonarr ───────────────────▶ vsniff bridge ───────────────────────────▶ chinaq
+        ◀── releases ───────                                          hkanime
+            grab (SABnzbd)              runs vsniff per episode        dramasq
+        ───────────────────▶            ───────────────────────────▶
+        ◀── "Completed" ────   <downloads>/tv/<release name>/Show - S01E07 - WEBDL - 1080p.mp4
+ import ──▶ your library ──▶ Jellyfin
+```
+
+### What it does
+
+- **Finds the show on each site.** Sonarr only knows a show by its ids and
+  English/romanised names, while the sites list Chinese titles. The bridge
+  gathers every name for the show — Sonarr's, plus TMDB's Chinese titles per
+  region (the Hong Kong name can differ entirely: 間諜家家酒, not 間諜過家家) —
+  and searches each site in simplified and traditional script.
+- **Only accepts a result it can prove is the right season.** A wrong match
+  is worse than none, because the release is named after Sonarr's show and
+  Sonarr can't tell it got a different video. A result is rejected unless:
+  its name is one of the show's names (spelling variants, simplified vs
+  traditional and punctuation don't matter); it isn't a movie; it's on
+  hkanime only if the show is animation; any extra words name the season
+  (TMDB season names like 遊郭篇); a season marker (S2, 第二季) matches; and
+  its episode count fits the season. Sites that list several seasons as one
+  entry (信蜂, 50 episodes = S1 + S2) are mapped with an offset.
+- **Names releases so Sonarr understands them:**
+  `Tigers Sniff the Rose S01E07 1080p WEB-DL AAC-dramasq` — the resolution
+  is measured from the stream (one probe per entry, cached), and the release
+  group is the site.
+- **Keeps a season on one source.** For automatic grabs it pins each season
+  to its best source (highest resolution, then closest title) the first time
+  it's asked, and every later episode — including ones that air months later —
+  comes from that pin. If the pinned page disappears it re-pins; if you
+  manually grab a different source, that becomes the pin.
+- **Shows what it's doing** on a status page at `http://<host>:8990/`:
+  pinned sources and recent downloads.
+
+### Running it (Docker)
+
+The image bundles Chromium, ffmpeg and vsniff. Put the three keys in files
+only you can read (never in `docker-compose.yml`):
+
+```bash
+mkdir -p ~/.config/vsniff-bridge && cd ~/.config/vsniff-bridge
+(umask 077
+ python3 -c "import secrets; print(secrets.token_hex(16))" > bridge-key   # Sonarr will use this
+ read -rsp "Sonarr API key (Settings > General): " k && printf '%s\n' "$k" > sonarr-key; echo
+ read -rsp "TMDB API key: " k && printf '%s\n' "$k" > tmdb-key; echo)
+```
+
+Then add the service next to Sonarr (same Docker network, same media mount):
+
+```yaml
+  vsniff-bridge:
+    build: ./projects/vsniff            # path to this repository
+    container_name: vsniff-bridge
+    user: "1000:1001"                   # same user/group as Sonarr's files
+    environment:
+      - SONARR_URL=http://sonarr:8989
+      - VSNIFF_BRIDGE_API_KEY_FILE=/keys/bridge-key
+      - SONARR_API_KEY_FILE=/keys/sonarr-key
+      - TMDB_API_KEY_FILE=/keys/tmdb-key
+      - VSNIFF_COMPLETE_DIR=/media/downloads/vsniff
+    volumes:
+      - ~/.config/vsniff-bridge:/keys:ro
+      - ./vsniff-bridge:/data           # bridge.db: pins, jobs, probe cache
+      - /path/to/media:/media           # mounted at the same path as in Sonarr
+    ports:
+      - "8990:8990"
+    restart: unless-stopped
+```
+
+The download folder has to be the same path inside both containers, so Sonarr
+can import what the bridge writes; mounting the media folder at the same place
+in both does that.
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `VSNIFF_BRIDGE_API_KEY[_FILE]` | — (required) | The key Sonarr sends to the bridge |
+| `SONARR_URL` | `http://sonarr:8989` | Where the bridge reads show details from |
+| `SONARR_API_KEY[_FILE]` | — (required) | Sonarr's API key |
+| `TMDB_API_KEY[_FILE]` | — | TMDB v3 key for Chinese titles; without it only Sonarr's names are searched |
+| `VSNIFF_COMPLETE_DIR` | `/media/downloads/vsniff` | Finished downloads (one folder per category) |
+| `VSNIFF_CATEGORIES` | `tv,movies` | Download categories offered to Sonarr |
+| `VSNIFF_WORKERS` | `1` | Downloads at a time |
+| `VSNIFF_SEARCH_INTERVAL` | `2` | Seconds between searches on one site (dramasq rate-limits bursts) |
+| `VSNIFF_DATA_DIR` | `/data` | Where `bridge.db` lives |
+
+Without Docker: `pip install -e ".[bridge]"`, set the same variables, and run
+`vsniff-bridge` (port 8990).
+
+### Setting up Sonarr
+
+**1. The download client** — Settings → Download Clients → + → **SABnzbd**:
+
+| Field | Value |
+|-------|-------|
+| Name | `vsniff` |
+| Host / Port | `vsniff-bridge` / `8990` |
+| API Key | the contents of `bridge-key` |
+| Category | `tv` |
+
+Press **Test** (it should pass with no warnings), then Save.
+
+**2. The indexer — add it twice**, so every show can be browsed but only the
+shows you choose are downloaded automatically. Settings → Indexers → + →
+**Newznab** → Custom:
+
+| Field | vsniff (browse) | vsniff (auto) |
+|-------|-----------------|---------------|
+| URL | `http://vsniff-bridge:8990` | `http://vsniff-bridge:8990` |
+| API Key | `bridge-key` | `bridge-key` |
+| Categories | TV/SD, TV/HD | TV/SD, TV/HD |
+| Enable RSS | off | on |
+| Enable Automatic Search | off | on |
+| Enable Interactive Search | on | on |
+| Additional Parameters (advanced) | — | `&vsniff=auto` |
+| Tags | — | `vsniff` |
+| Download Client (advanced) | `vsniff` | `vsniff` |
+
+- **vsniff (browse)** answers interactive searches (the person icon) for any
+  show, listing every site that has the episode. Nothing is grabbed unless
+  you pick it.
+- **vsniff (auto)** only serves shows tagged `vsniff`, and only from each
+  season's pinned source. Tag a show (its Edit dialog → Tags → `vsniff`) to
+  have new episodes downloaded through vsniff automatically.
+
+### Limitations
+
+- **TV only** for now; Radarr (movies) isn't wired up yet.
+- **Searches by id only.** Sonarr's title-only fallback searches return
+  nothing, as do daily shows (dated episodes) and Sonarr's *anime* series type
+  (which searches by absolute episode number) — use the *standard* type.
+- **Absolute-numbered entries aren't mapped yet**: hkanime's One Piece
+  (episodes 517–819) won't line up with Sonarr's seasons.
+- **Releases are all marked Chinese.** dramasq also carries anime in its
+  original Japanese with subtitles; the release group (`-dramasq` vs
+  `-hkanime`, which is Cantonese dubs) tells them apart.
+- **Sizes are estimates** (from the episode length and resolution); the real
+  size is known once downloaded. Progress in Sonarr's queue is by length.
+
+---
+
+## Command line: what you need
 
 This guide assumes a **Mac** with nothing installed and no prior Python
 experience. You'll paste a handful of commands into the **Terminal** app
@@ -42,7 +198,7 @@ You'll install four things:
 
 ---
 
-## Setup (one time, ~10 minutes)
+## Command line: setup (one time, ~10 minutes)
 
 ### Step 1 — Install Homebrew
 
@@ -106,7 +262,7 @@ If you see a help message, setup is complete. 🎉
 
 ---
 
-## Using it
+## Command line: using it
 
 The basic form:
 
@@ -456,6 +612,17 @@ page URL ─▶ [ browser: (try sources,) sniff the network ]
 | `ffmpeg: command not found` | `brew install ffmpeg` again. |
 | `.venv/bin/vsniff: No such file or directory` | Your setup predates the `vsniff` command (it used to be `python vsniff.py`). Run `./.venv/bin/pip install -e .` once. |
 
+**Sonarr bridge**
+
+| Problem | Fix |
+|---------|-----|
+| Indexer **Test** fails | Check the URL (`http://vsniff-bridge:8990`, reachable from Sonarr's container) and the API key; `docker logs vsniff-bridge` shows why. |
+| Download client Test warns about the category | Set the category to one in `VSNIFF_CATEGORIES` (default `tv`). |
+| A show you know is on a site finds nothing | The bridge logs every rejected result with its reason at debug level: run with `--log-level debug`. Often the site's title differs from every name Sonarr and TMDB have for the show. |
+| Searches are slow the first time | Each site is searched in several spellings, paced to avoid rate limits, and each source is probed once for its resolution. Results are cached, so repeats are quick. |
+| Sonarr imports nothing after "Completed" | The download folder must be the same path in both containers (see [Running it](#running-it-docker)). |
+| Wrong source pinned for a season | Grab the episode you want from interactive search; that source becomes the season's pin. Pins are listed on the status page. |
+
 ---
 
 ## For developers
@@ -474,7 +641,8 @@ vsniff/
   naming.py       Sonarr/Jellyfin filenames; what's already on disk
   common.py       user agent, VsniffError, URL and text helpers
   sites/          one adapter per site, plus GenericSite (the fallback)
-tests/            one test file per module
+  bridge/         the Sonarr bridge service (see below)
+tests/            one test file per module (test_bridge_* for the bridge)
 ```
 
 **Adding a site:** create `vsniff/sites/<site>.py` with a subclass of
@@ -488,7 +656,7 @@ Then add an instance to `ADAPTERS` in `vsniff/sites/__init__.py`, ahead of
 sources per episode; `hkanime.py` for one with a single stream per episode.
 
 **Using vsniff from Python:** `vsniff.api` exposes what the CLI does, for a
-program that drives vsniff (such as a service feeding Sonarr):
+program that drives vsniff (the Sonarr bridge is built on it):
 
 ```python
 from vsniff import api
@@ -514,12 +682,35 @@ with api.Session() as s:                          # one headless browser, reused
 - A `Session` starts its browser on first use. Playwright is single-threaded:
   give each worker thread its own `Session`. Errors raise `VsniffError`.
 
+**The Sonarr bridge** lives in `vsniff/bridge/`:
+
+```
+vsniff/bridge/
+  app.py          FastAPI service: Newznab + SABnzbd endpoints, status page
+  newznab.py      caps / release feed / placeholder .nzb, shaped by Sonarr's parser
+  sabnzbd.py      version / config / queue / history answers Sonarr's client checks
+  resolver.py     Sonarr request -> releases; picks and remembers each season's pin
+  matching.py     the gates a search result must pass to count as a show's season
+  textnorm.py     Chinese title normalising, season/year/language markers, queries
+  metadata.py     Sonarr (numbering) + TMDB (Chinese titles, season names)
+  access.py       paced, cached site searches; one browser thread for lists/probes
+  worker.py       download workers (one vsniff Session each)
+  store.py        SQLite: pins, releases, jobs, probes
+  config.py       settings from environment variables
+```
+
+The protocol details (which fields Sonarr reads, which answers make its Test
+pass) come from Sonarr 4's own client code, noted at the top of `newznab.py`
+and `sabnzbd.py`.
+
 **Running the tests:**
 
 ```bash
-./.venv/bin/pip install -e ".[dev]"
+./.venv/bin/pip install -e ".[bridge,dev]"
 ./.venv/bin/python -m pytest
 ```
+
+Without the `bridge` extra the bridge tests are skipped.
 
 When a test stubs out a function, patch it on the module that *calls* it
 (e.g. `monkeypatch.setattr(dramasq, "sniff_once", ...)`, not on
