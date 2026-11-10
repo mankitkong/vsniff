@@ -17,13 +17,16 @@ you just provide --episode yourself.
         --series "Blossoms of Power" --source ZYun
 """
 import argparse
+import itertools
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import urllib.request
 from functools import lru_cache
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, urljoin, urlparse, urlsplit, urlunsplit
 
 from playwright.sync_api import sync_playwright
@@ -134,24 +137,218 @@ def parse_subtitle_playlist(playlist_text, m3u8_url):
     return None
 
 
-def analyze_playlist(ctx, m3u8_url, referer):
-    """Return (resolution_tag, duration_seconds_or_None, subtitle_url_or_None)."""
+def analyze_playlist(ctx, m3u8_url, referer, keep_ads=False):
+    """Return (resolution, duration, subtitle_url, playlist_for_ffmpeg).
+
+    playlist_for_ffmpeg is m3u8_url itself, or a localhost URL serving a copy
+    with spliced-in ad blocks removed (see find_ad_blocks).
+    """
     text = fetch_text(ctx, m3u8_url, referer)
     resolution = parse_resolution(text, m3u8_url)
     subtitles = parse_subtitle_playlist(text, m3u8_url)
 
     media_text, media_url = text, m3u8_url
+    variants = 0
     if "EXT-X-STREAM-INF" in text:  # master -> resolve first variant for durations
         for line in text.splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
-                media_url = urljoin(m3u8_url, line)
-                media_text = fetch_text(ctx, media_url, referer)
-                break
+                variants += 1
+                if variants == 1:
+                    media_url = urljoin(m3u8_url, line)
+                    media_text = fetch_text(ctx, media_url, referer)
 
     secs = [float(s) for s in EXTINF_RX.findall(media_text)]
     duration = sum(secs) if secs else None
-    return resolution, duration, subtitles
+
+    playlist = m3u8_url
+    # Only rewrite a playlist we fully understand: a media playlist, or a master
+    # with a single variant and no separate audio track. A master with several
+    # variants or audio renditions is left for ffmpeg to pick from as before.
+    rewritable = variants <= 1 and "TYPE=AUDIO" not in text
+    if not keep_ads and rewritable and secs:
+        cleaned = strip_ads(media_text, media_url)
+        if cleaned:
+            clean_text, removed_s, removed_n = cleaned
+            playlist = serve_playlist(clean_text)
+            duration -= removed_s
+            print(f"  ads: removed {removed_n} spliced-in block(s), "
+                  f"{removed_s:.0f}s total")
+    return resolution, duration, subtitles, playlist
+
+
+# ---- spliced-in ad removal ------------------------------------------------ #
+# Some sources splice short ad clips into the episode's HLS playlist, each
+# bracketed by #EXT-X-DISCONTINUITY. Two tells, both seen on chinaq sources:
+#   * the clip's segments live in a different directory from the episode's
+#     (e.g. /20261102/8EzXUOn8/10134kb/hls/ inside a /20261019/7cbiw8z4/... show)
+#   * the clip shares the episode's directory but was encoded at another frame
+#     rate (30fps ads in a 25fps episode), which shows in the EXTINF durations:
+#     a segment always holds a whole number of frames.
+# Discontinuities alone mean nothing: some sources split every scene cut into
+# its own block, so a block is only dropped on one of the tells above, and only
+# when it is short.
+AD_MAX_BLOCK_S = 60      # longest run of segments we would ever call an ad
+AD_MAX_SHARE = 0.2       # never strip more than this fraction of the episode
+FRAME_RATES = (24000 / 1001, 24, 25, 30000 / 1001, 30, 50, 60000 / 1001, 60)
+HEADER_TAGS = ("#EXTM3U", "#EXT-X-VERSION", "#EXT-X-TARGETDURATION",
+               "#EXT-X-MEDIA-SEQUENCE", "#EXT-X-PLAYLIST-TYPE",
+               "#EXT-X-INDEPENDENT-SEGMENTS", "#EXT-X-ALLOW-CACHE")
+STATEFUL_TAGS = ("#EXT-X-KEY", "#EXT-X-MAP")  # apply until replaced
+TAG_URI_RX = re.compile(r'URI="([^"]+)"')
+
+
+def parse_media_playlist(text, url):
+    """Split a media playlist into (header_lines, blocks).
+
+    Each block is the run of segments between discontinuities; each segment is
+    a dict with its absolute uri, duration, own tag lines, and the KEY/MAP tags
+    in force for it (so dropping a block never strands the next one's key).
+    """
+    header, blocks, pending = [], [[]], []
+    state = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line == "#EXT-X-ENDLIST":
+            continue
+        if line.startswith(HEADER_TAGS):
+            header.append(line)
+        elif line == "#EXT-X-DISCONTINUITY":
+            if blocks[-1]:
+                blocks.append([])
+        elif line.startswith(STATEFUL_TAGS):
+            tag = line.split(":", 1)[0]
+            state[tag] = TAG_URI_RX.sub(
+                lambda m: f'URI="{urljoin(url, m.group(1))}"', line)
+        elif line.startswith("#"):
+            pending.append(line)
+        else:
+            m = EXTINF_RX.match(next(
+                (t for t in pending if t.startswith("#EXTINF")), ""))
+            blocks[-1].append({
+                "uri": urljoin(url, line),
+                "duration": float(m.group(1)) if m else 0.0,
+                "tags": pending,
+                "state": dict(state),
+            })
+            pending = []
+    return header, [b for b in blocks if b]
+
+
+def _fits_frame_rate(duration, fps):
+    frames = duration * fps
+    return abs(frames - round(frames)) <= 0.003 * fps  # within 3ms of a frame
+
+
+def _seg_dir(uri):
+    return urlsplit(uri).path.rsplit("/", 1)[0]
+
+
+def find_ad_blocks(blocks):
+    """Indices of the blocks that look like spliced-in ads."""
+    if len(blocks) < 2:
+        return set()
+    segs = [s for b in blocks for s in b]
+    total = sum(s["duration"] for s in segs)
+    if total <= 0:
+        return set()
+
+    by_dir = {}
+    for s in segs:
+        by_dir[_seg_dir(s["uri"])] = by_dir.get(_seg_dir(s["uri"]), 0) + s["duration"]
+    main_dir = max(by_dir, key=by_dir.get)
+
+    # The episode's frame rate: the lowest one that explains >=90% of the
+    # airtime. Grids nest (every 25fps duration also fits 50fps, and a few 30fps
+    # ad durations happen to as well), so the highest-scoring rate can be a
+    # coarser grid that hides the ad; the lowest well-fitting rate is the real one.
+    share = {fps: sum(s["duration"] for s in segs
+                      if _fits_frame_rate(s["duration"], fps)) / total
+             for fps in FRAME_RATES}
+    fitting = [f for f in FRAME_RATES if share[f] >= 0.9]
+    main_fps = min(fitting) if fitting else None
+
+    ads = set()
+    for i, block in enumerate(blocks):
+        length = sum(s["duration"] for s in block)
+        if length > AD_MAX_BLOCK_S:
+            continue
+        foreign = all(_seg_dir(s["uri"]) != main_dir for s in block)
+        off_grid = main_fps is not None and sum(
+            not _fits_frame_rate(s["duration"], main_fps) for s in block
+        ) * 2 > len(block)
+        if foreign or off_grid:
+            ads.add(i)
+
+    removed = sum(s["duration"] for i in ads for s in blocks[i])
+    if len(ads) == len(blocks) or removed > total * AD_MAX_SHARE:
+        return set()  # implausible: rather keep an ad than lose the episode
+    return ads
+
+
+def strip_ads(text, url):
+    """(clean_playlist_text, removed_seconds, removed_blocks), or None if the
+    playlist has no ad blocks. Segment and key URIs in the result are absolute,
+    so it can be served from anywhere."""
+    header, blocks = parse_media_playlist(text, url)
+    ads = find_ad_blocks(blocks)
+    if not ads:
+        return None
+    out = list(header) or ["#EXTM3U"]
+    emitted = {}
+    first = True
+    for i, block in enumerate(blocks):
+        if i in ads:
+            continue
+        if not first:
+            out.append("#EXT-X-DISCONTINUITY")
+        first = False
+        for s in block:
+            for tag, line in s["state"].items():
+                if emitted.get(tag) != line:
+                    out.append(line)
+                    emitted[tag] = line
+            out.extend(s["tags"])
+            out.append(s["uri"])
+    out.append("#EXT-X-ENDLIST")
+    removed = sum(s["duration"] for i in ads for s in blocks[i])
+    return "\n".join(out) + "\n", removed, len(ads)
+
+
+# ffmpeg only forwards -headers (our Referer) to segment requests when the
+# playlist itself arrives over HTTP — a local file input rejects the option — so
+# cleaned playlists are served from a throwaway localhost server.
+_served = {}
+_server = None
+_serial = itertools.count(1)
+
+
+class _PlaylistHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = _served.get(self.path)
+        if body is None:
+            self.send_error(404)
+            return
+        data = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+def serve_playlist(text):
+    """Serve a playlist on localhost for the life of the process; return its URL."""
+    global _server
+    if _server is None:
+        _server = ThreadingHTTPServer(("127.0.0.1", 0), _PlaylistHandler)
+        threading.Thread(target=_server.serve_forever, daemon=True).start()
+    path = f"/clean-{next(_serial)}.m3u8"
+    _served[path] = text
+    return f"http://127.0.0.1:{_server.server_address[1]}{path}"
 
 
 # --------------------------------------------------------------------------- #
@@ -451,17 +648,19 @@ def available_episodes(by_sid):
 # --------------------------------------------------------------------------- #
 # Discovery orchestration (one browser session)
 # --------------------------------------------------------------------------- #
-def discover_with_session(adapter, page, ctx, url, user_source):
+def discover_with_session(adapter, page, ctx, url, user_source, keep_ads=False):
     """Discover one stream using an already-open browser session.
 
-    Returns (source_label, m3u8_url, referer, resolution, duration, subtitles).
+    Returns (source_label, playlist, referer, resolution, duration, subtitles);
+    playlist is the stream URL, or a local ad-stripped copy of it.
     """
     label, m3u8, referer = adapter.discover(page, ctx, url, user_source)
-    resolution, duration, subtitles = analyze_playlist(ctx, m3u8, referer)
-    return label, m3u8, referer, resolution, duration, subtitles
+    resolution, duration, subtitles, playlist = analyze_playlist(
+        ctx, m3u8, referer, keep_ads)
+    return label, playlist, referer, resolution, duration, subtitles
 
 
-def discover_stream(url, user_source, show=False):
+def discover_stream(url, user_source, show=False, keep_ads=False):
     """Return (adapter,) + everything discover_with_session found."""
     adapter = pick_adapter(url)
     with sync_playwright() as p:
@@ -469,7 +668,8 @@ def discover_stream(url, user_source, show=False):
         ctx = browser.new_context(user_agent=UA)
         page = ctx.new_page()
         try:
-            found = discover_with_session(adapter, page, ctx, url, user_source)
+            found = discover_with_session(
+                adapter, page, ctx, url, user_source, keep_ads)
             return (adapter,) + found
         finally:
             browser.close()
@@ -516,7 +716,7 @@ def download_all(url, args):
                     print(f"episode {ep}: discovering...")
                     (label, m3u8, referer, resolution, duration,
                      subtitles) = discover_with_session(
-                        adapter, page, ctx, ep_url, args.source)
+                        adapter, page, ctx, ep_url, args.source, args.keep_ads)
                     fname = build_filename(
                         args.series, args.season, ep, args.quality, resolution)
                     out_path = os.path.join(out_dir, fname)
@@ -537,7 +737,8 @@ def download_all(url, args):
                 try:
                     (_lbl, _m3u8, referer, _res, _dur,
                      subtitles) = discover_with_session(
-                        adapter, page, ctx, by_ep[ep], args.source)
+                        adapter, page, ctx, by_ep[ep], args.source,
+                        keep_ads=True)  # video is already on disk
                     if not subtitles:
                         # Whether a series is packaged with a subtitle track is a
                         # property of the series, not of one episode (checked
@@ -727,7 +928,9 @@ def download_movie(adapter, args):
 
     print("discovering stream...")
     (_adapter, label, m3u8, referer, resolution, duration,
-     subtitles) = discover_stream(url, args.source, show=args.show)
+     subtitles) = discover_stream(
+        url, args.source, show=args.show,
+        keep_ads=args.keep_ads or bool(have))  # `have`: video already on disk
     if have:
         print(f"already present: {have}")
         if subtitles:
@@ -780,6 +983,8 @@ def main(argv=None):
                          "(automatic for hkanime 劇場版 entries)")
     ap.add_argument("--year", type=int,
                     help="movie release year, for the folder/filename")
+    ap.add_argument("--keep-ads", dest="keep_ads", action="store_true",
+                    help="don't strip ad clips spliced into the stream")
     ap.add_argument("--show", action="store_true", help="run the browser headful (debug)")
     args = ap.parse_args(argv)
 
@@ -811,7 +1016,8 @@ def main(argv=None):
 
         print("discovering stream...")
         (adapter, label, m3u8, referer, resolution, duration,
-         subtitles) = discover_stream(args.url, args.source, show=args.show)
+         subtitles) = discover_stream(args.url, args.source, show=args.show,
+                                      keep_ads=args.keep_ads)
         dur_txt = _fmt_time(duration) if duration else "unknown"
         subs_txt = "yes" if subtitles else "none"
         print(f"stream: source={label}  resolution={resolution}  "

@@ -167,6 +167,7 @@ You'll see a live progress bar:
 | `--sub-lang` | | `zh` | Language code for the `.srt` sidecar |
 | `--movie` | | auto | Name it as a movie (automatic for hkanime movie entries) |
 | `--year` | | — | Movie release year, used in the folder and filename |
+| `--keep-ads` | | off | Don't strip ad clips spliced into the stream (see below) |
 | `--show` | | off | Show the browser window (for debugging) |
 
 ### chinaq sources (`--source`)
@@ -241,6 +242,23 @@ Which sites have them:
 |------|--------------------------|
 | **hkanime.com** | Sometimes — roughly 4 in 10 series carry one |
 | **chinaq.net** | No — subtitles are burned into the picture, so there's nothing to save |
+
+### Spliced-in ads
+
+Some chinaq sources splice ~15–20s gambling ads into the middle of the video
+itself (seen on DYun and Uyun). vsniff removes them before downloading and
+says so:
+
+```
+  ads: removed 4 spliced-in block(s), 71s total
+```
+
+A clip is only treated as an ad when it is short (≤60s), sits between
+discontinuity markers, **and** either comes from a different folder on the
+server than the episode or was encoded at a different frame rate (e.g. a 30fps
+ad in a 25fps episode). If that would remove more than 20% of the episode,
+nothing is removed. If you ever spot a missing scene, re-run with `--keep-ads`
+to download the stream untouched.
 
 ### Downloading a whole series (`--all`)
 
