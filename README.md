@@ -76,57 +76,74 @@ use them — and, for chinaq and dramasq, source selection):
 
 ### Running it (Docker)
 
-The image bundles Chromium, ffmpeg and vsniff. Put the three keys in files
-only you can read (never in `docker-compose.yml`):
-
-```bash
-mkdir -p ~/.config/vsniff-bridge && cd ~/.config/vsniff-bridge
-(umask 077
- python3 -c "import secrets; print(secrets.token_hex(16))" > bridge-key   # Sonarr will use this
- read -rsp "Sonarr API key (Settings > General): " k && printf '%s\n' "$k" > sonarr-key; echo
- read -rsp "TMDB API key: " k && printf '%s\n' "$k" > tmdb-key; echo)
-```
-
-Then add the service next to Sonarr (same Docker network, same media mount):
+The image bundles Chromium, ffmpeg and vsniff. Add the service next to Sonarr
+in the same `docker-compose.yml`:
 
 ```yaml
   vsniff-bridge:
-    build: ./projects/vsniff            # path to this repository
+    build: ./projects/vsniff                       # path to this repository
     container_name: vsniff-bridge
-    user: "1000:1001"                   # same user/group as Sonarr's files
+    user: "1000:1001"                              # same user/group as Sonarr's files
     environment:
       - SONARR_URL=http://sonarr:8989
-      - VSNIFF_BRIDGE_API_KEY_FILE=/keys/bridge-key
-      - SONARR_API_KEY_FILE=/keys/sonarr-key
-      - TMDB_API_KEY_FILE=/keys/tmdb-key
+      - SONARR_API_KEY_FILE=/keys/sonarr-config.xml   # key read from Sonarr's own config
+      - TMDB_API_KEY_FILE=/keys/tmdb-key              # optional, for Chinese titles
       - VSNIFF_COMPLETE_DIR=/media/downloads/vsniff
     volumes:
-      - ~/.config/vsniff-bridge:/keys:ro
-      - ./vsniff-bridge:/data           # bridge.db: pins, jobs, probe cache
-      - /path/to/media:/media           # mounted at the same path as in Sonarr
+      - ./vsniff-bridge:/data                      # api-key + bridge.db
+      - ./sonarr/config/config.xml:/keys/sonarr-config.xml:ro
+      - ./tmdb-key:/keys/tmdb-key:ro               # a file holding your TMDB v3 key
+      - /path/to/media:/media                      # the same mount Sonarr has
     ports:
       - "8990:8990"
     restart: unless-stopped
 ```
 
-The download folder has to be the same path inside both containers, so Sonarr
-can import what the bridge writes; mounting the media folder at the same place
-in both does that.
+```bash
+docker compose up -d --build vsniff-bridge
+docker logs vsniff-bridge        # says where everything is and whether Sonarr/TMDB answer
+```
 
-| Setting | Default | Meaning |
-|---------|---------|---------|
-| `VSNIFF_BRIDGE_API_KEY[_FILE]` | — (required) | The key Sonarr sends to the bridge |
+There are no keys to copy by hand: Sonarr's key is read from Sonarr's own
+`config.xml` (so it stays right if you regenerate it), and the bridge makes
+its own key on first start. A [TMDB](https://www.themoviedb.org/settings/api)
+key is optional but strongly recommended — it's where the Chinese titles come
+from. Two things must line up:
+
+- **Same media path in both containers.** Sonarr imports what the bridge
+  writes to `VSNIFF_COMPLETE_DIR`, so the media folder has to be mounted at the
+  same place in both.
+- **Same user as Sonarr's files** (`user:`), so Sonarr can move what the
+  bridge downloaded.
+
+**Where to look**
+
+| What | Where |
+|------|-------|
+| Is it running, and what is it doing? | Status page: `http://<host>:8990/` (pinned sources, recent downloads) |
+| Startup checks, searches, rejected matches, download errors | `docker logs vsniff-bridge` (`--log-level debug` in the command for every rejection) |
+| The key Sonarr needs | `./vsniff-bridge/api-key` |
+| Pins, jobs, probe cache | `./vsniff-bridge/bridge.db` (SQLite) |
+| Finished downloads | `<VSNIFF_COMPLETE_DIR>/tv/<release name>/` — Sonarr moves them into the library |
+| Settings | the `environment:` block above; every variable is listed below |
+
+**Settings**
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
 | `SONARR_URL` | `http://sonarr:8989` | Where the bridge reads show details from |
-| `SONARR_API_KEY[_FILE]` | — (required) | Sonarr's API key |
+| `SONARR_API_KEY[_FILE]` | — (required) | Sonarr's API key; the file may be Sonarr's `config.xml` |
 | `TMDB_API_KEY[_FILE]` | — | TMDB v3 key for Chinese titles; without it only Sonarr's names are searched |
+| `VSNIFF_BRIDGE_API_KEY[_FILE]` | generated into `<VSNIFF_DATA_DIR>/api-key` | The key Sonarr sends to the bridge |
 | `VSNIFF_COMPLETE_DIR` | `/media/downloads/vsniff` | Finished downloads (one folder per category) |
 | `VSNIFF_CATEGORIES` | `tv,movies` | Download categories offered to Sonarr |
 | `VSNIFF_WORKERS` | `1` | Downloads at a time |
 | `VSNIFF_SEARCH_INTERVAL` | `2` | Seconds between searches on one site (dramasq rate-limits bursts) |
-| `VSNIFF_DATA_DIR` | `/data` | Where `bridge.db` lives |
+| `VSNIFF_DATA_DIR` | `/data` | Where `api-key` and `bridge.db` live |
 
-Without Docker: `pip install -e ".[bridge]"`, set the same variables, and run
-`vsniff-bridge` (port 8990).
+`*_FILE` variants read the value from a file, so keys stay out of
+`docker-compose.yml`. Without Docker: `pip install -e ".[bridge]"`, set the
+same variables, and run `vsniff-bridge` (port 8990).
 
 ### Setting up Sonarr
 
@@ -136,7 +153,7 @@ Without Docker: `pip install -e ".[bridge]"`, set the same variables, and run
 |-------|-------|
 | Name | `vsniff` |
 | Host / Port | `vsniff-bridge` / `8990` |
-| API Key | the contents of `bridge-key` |
+| API Key | the contents of `vsniff-bridge/api-key` |
 | Category | `tv` |
 
 Press **Test** (it should pass with no warnings), then Save.
@@ -148,7 +165,7 @@ shows you choose are downloaded automatically. Settings → Indexers → + →
 | Field | vsniff (browse) | vsniff (auto) |
 |-------|-----------------|---------------|
 | URL | `http://vsniff-bridge:8990` | `http://vsniff-bridge:8990` |
-| API Key | `bridge-key` | `bridge-key` |
+| API Key | `vsniff-bridge/api-key` | `vsniff-bridge/api-key` |
 | Categories | TV/SD, TV/HD | TV/SD, TV/HD |
 | Enable RSS | off | on |
 | Enable Automatic Search | off | on |
