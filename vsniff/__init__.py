@@ -12,18 +12,22 @@ without an adapter still work — you just provide --episode yourself.
 
     vsniff "https://www.hkanime.com/play/<name>/120x0" \\
         --series "Fullmetal Alchemist Brotherhood" --season 1
-    vsniff "https://chinaq.net/video/68261-7.html#sid=9" \\
-        --series "Blossoms of Power" --source ZYun
+    vsniff "https://chinaq.net/video/1104-7.html#sid=3" \\
+        --series "Tigers Sniff the Rose" --source 3
     vsniff "https://dramasq.io/vodplay/202614591/ep1.html" \\
         --series "Fall in Love with the Moon"
+    vsniff search 长相思                     # find page URLs by title
+
+From Python, see vsniff.api (search, and a Session for catalog/probe/download).
 
 Layout:
-    cli          argument parsing; single, --all and movie flows
+    api          Python API: search; Session for catalog / probe / download
+    cli          argument parsing; single, --all, movie and search flows
     discovery    find one stream in a browser session
     sniff        capture an .m3u8 from a page's network traffic
-    playlist     resolution/length/subtitles; serve ad-stripped copies
+    playlist     resolution (ffprobe fallback)/length/subtitles; ad-stripped copies
     ads          spliced-in ad detection (pure text processing)
-    download     ffmpeg download with progress bar; subtitle sidecars
+    download     ffmpeg download with progress bar or callback; subtitle sidecars
     naming       Sonarr/Jellyfin filenames; what is already on disk
     sites/       one adapter per site
 """

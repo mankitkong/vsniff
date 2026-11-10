@@ -1,12 +1,51 @@
 """hkanime.com: one stream per episode, straight from its play-api."""
 import json
 import re
+import time
 import urllib.request
 from functools import lru_cache
 
-from ..common import UA, VsniffError, encode_url, origin_of
+from ..common import UA, VsniffError, clean_text, encode_url, origin_of
 from ..sniff import sniff_once
-from .base import GenericSite
+from .base import GenericSite, SearchResult, episode_count, http_get
+
+
+HK_INDEX_TTL = 600  # seconds to reuse the site index between searches
+_hk_index = {"at": 0.0, "data": None}
+
+
+def hk_index(origin):
+    """The site's full anime index ({entry_url: [info]}), cached briefly.
+
+    The /play search page downloads this one JSON and filters it in the
+    browser, so searching means doing the same. ~160 KB; reused for
+    HK_INDEX_TTL so a burst of searches (one per title variant) fetches it once.
+    """
+    now = time.monotonic()
+    if _hk_index["data"] is None or now - _hk_index["at"] > HK_INDEX_TTL:
+        _hk_index["data"] = json.loads(http_get(f"{origin}/json-api", referer=f"{origin}/play"))
+        _hk_index["at"] = now
+    return _hk_index["data"]
+
+
+def hk_search(index, query):
+    """[SearchResult] for index entries whose name or tags contain query.
+
+    The site's own rule: a case-insensitive substring match on name or tag.
+    (The page also converts both sides to Hong Kong traditional with OpenCC;
+    callers get the same effect by searching the HK-traditional form too.)
+    """
+    q = clean_text(query).lower()
+    if not q:
+        return []
+    results = []
+    for url, entries in index.items():
+        info = (entries or [{}])[0]
+        name = clean_text(info.get("name", ""))
+        if q in name.lower() or q in clean_text(info.get("tag", "")).lower():
+            note = clean_text(info.get("remarks", ""))
+            results.append(SearchResult("hkanime", name, url, note, episode_count(note)))
+    return results
 
 
 HK_EP_RX = re.compile(r"^\s*EP\s*#?\s*0*(\d+)", re.I)
@@ -62,10 +101,20 @@ class HKAnimeSite(GenericSite):
     """
     name = "hkanime"
     supports_batch = True
+    supports_search = True
+    ORIGIN = "https://www.hkanime.com"
     URL_RX = re.compile(r"^(?P<prefix>.*/play/[^/]+)/(?P<sid>\d+)(?:x(?P<idx>\d+))?$")
 
     def matches(self, host):
         return host.endswith("hkanime.com")
+
+    def search(self, query):
+        """Search hkanime's index (Cantonese-dubbed anime only).
+
+        Seasons are separate entries ("… S1", "… S2", or named arcs) and
+        movies carry the note "劇場版".
+        """
+        return hk_search(hk_index(self.ORIGIN), query)
 
     def _parts(self, url):
         """(url_prefix, series_id, ep_index); ids are None when unparseable."""

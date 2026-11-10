@@ -2,11 +2,34 @@
 import json
 import re
 import urllib.request
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
-from ..common import UA, VsniffError, origin_of
+from ..common import UA, VsniffError, clean_text, origin_of
 from ..sniff import sniff_once
-from .base import GenericSite, match_source
+from .base import GenericSite, SearchResult, episode_count, http_get, match_source
+
+
+DQ_RESULT_RX = re.compile(r'<a class="drama[^"]*" href="(/detail/\d+\.html)">([^<]*)</a>')
+# a result reads "長相思 第二季 第23集" or "繁花 第30集完結": the trailing part is status
+DQ_STATUS_RX = re.compile(r"\s*((?:第\d+集)?\s*(?:完結|完结)?)\s*$")
+
+
+def parse_search(html, origin="https://dramasq.io"):
+    """[SearchResult] from a dramasq /search page (results list only)."""
+    start = html.find('class="main-content')
+    if start < 0:
+        return []
+    end = html.find('class="sidebar', start)
+    block = html[start:end if end > 0 else None]
+    results = []
+    for href, text in DQ_RESULT_RX.findall(block):
+        text = clean_text(text)
+        m = DQ_STATUS_RX.search(text)
+        note = m.group(1).strip() if m else ""
+        title = text[:m.start()].strip() if m and note else text
+        results.append(SearchResult("dramasq", title, origin + href, note,
+                                    episode_count(note)))
+    return results
 
 
 DQ_SOURCE_RX = re.compile(
@@ -64,12 +87,26 @@ class DramasqSite(GenericSite):
     """
     name = "dramasq"
     supports_batch = True
+    supports_search = True
+    ORIGIN = "https://dramasq.io"
     URL_RX = re.compile(r"/(?:vodplay|detail)/(?P<sid>\d+)(?:/(?P<slug>[^/.#?]+))?")
     EP_SLUG_RX = re.compile(r"^ep(\d+)$")
     MAX_UNLISTED = 10  # newest episodes the API serves before the listing shows them
 
     def matches(self, host):
         return re.search(r"(^|\.)dramasq\.[a-z]+$", host) is not None
+
+    def search(self, query):
+        """Search dramasq's catalog (deep: entries go back to 2018).
+
+        The search is loose: it also returns near-misses (藏海传 finds 藏海花)
+        and titles that merely contain the query, so check what comes back.
+        Simplified queries match reliably; traditional ones only sometimes.
+        """
+        query = clean_text(query)
+        if not query:
+            return []
+        return parse_search(http_get(f"{self.ORIGIN}/search?q={quote(query)}"), self.ORIGIN)
 
     def _parts(self, url):
         """(series_id, slug); slug is e.g. "ep7", "sp", "20261110", or None."""

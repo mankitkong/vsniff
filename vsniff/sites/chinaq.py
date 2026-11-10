@@ -1,14 +1,59 @@
 """chinaq.net: several playback sources per episode, tried in turn."""
 import re
+from urllib.parse import quote
 
-from ..common import VsniffError, origin_of
+from ..common import VsniffError, clean_text, origin_of
 from ..sniff import sniff_once
-from .base import GenericSite, match_source
+from .base import GenericSite, SearchResult, episode_count, http_get, match_source
+
+
+CQ_CARD_RX = re.compile(r'<a href="(/voddetail/\d+\.html)">(.*?)</a>', re.S)
+CQ_TITLE_RX = re.compile(r'class="title[^"]*">\s*([^<]+?)\s*</div>')
+CQ_CAPTION_RX = re.compile(r'carousel-caption"><p>([^<]*)</p>')
+CQ_REGION_RX = re.compile(r'icon-region">([^<]*)<')
+
+
+def parse_search(html, origin="https://chinaq.net"):
+    """[SearchResult] from a chinaq /vodsearch page.
+
+    Only the results grid counts: the page also carries a "最近更新" sidebar
+    of unrelated shows that links the same way.
+    """
+    start = html.find('class="thumb sizing')
+    if start < 0:
+        return []
+    end = html.find('class="sidebar', start)
+    block = html[start:end if end > 0 else None]
+    results = []
+    for href, card in CQ_CARD_RX.findall(block):
+        title = CQ_TITLE_RX.search(card)
+        if not title:
+            continue
+        note = " ".join(clean_text(m.group(1)) for m in
+                        (CQ_REGION_RX.search(card), CQ_CAPTION_RX.search(card)) if m)
+        results.append(SearchResult("chinaq", clean_text(title.group(1)),
+                                    origin + href, note, episode_count(note)))
+    return results
 
 
 class ChinaqSite(GenericSite):
     name = "chinaq"
     supports_batch = True
+    supports_search = True
+    ORIGIN = "https://chinaq.net"
+
+    def search(self, query):
+        """Search chinaq's catalog (recent shows only; the site was rebuilt).
+
+        Its titles are traditional and sometimes use odd variant characters
+        (晚鞦寄情 for 晚秋寄情), so an exact title can miss where a two-character
+        piece of it still hits.
+        """
+        query = clean_text(query)
+        if not query:
+            return []
+        html = http_get(f"{self.ORIGIN}/vodsearch/-------------.html?wd={quote(query)}")
+        return parse_search(html, self.ORIGIN)
     SOURCE_RX = re.compile(
         r'#sid=(\d+)"[^>]*onclick="changeSid\(\'\d+\'\)"><strong>[^<]*</strong><small>([^<]*)</small>'
     )

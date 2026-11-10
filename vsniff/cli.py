@@ -163,7 +163,30 @@ def download_movie(adapter, args):
     return 0
 
 
+def search_main(argv):
+    """`vsniff search <title> [--site NAME ...]`: list matching entries."""
+    from .api import search, searchable_sites  # keeps plain downloads import-light
+    ap = argparse.ArgumentParser(
+        prog="vsniff search",
+        description="Search the supported sites for a series or movie by title. "
+                    "Sites match their own spelling, so try simplified and "
+                    "traditional forms (and a shorter piece of the title).")
+    ap.add_argument("query", nargs="+", help="title to look for")
+    ap.add_argument("--site", action="append", choices=searchable_sites(),
+                    help="only search this site (repeatable; default: all)")
+    args = ap.parse_args(argv)
+    results = search(" ".join(args.query), sites=args.site)
+    for r in results:
+        note = f"  [{r.note}]" if r.note else ""
+        print(f"{r.site:8} {r.title}{note}\n         {r.url}")
+    print(f"{len(results)} result(s)")
+    return 0
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "search":
+        return search_main(argv[1:])
     ap = argparse.ArgumentParser(
         prog="vsniff",
         description="Sniff and download a streaming video as a Sonarr/Jellyfin-named MP4.")

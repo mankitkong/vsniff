@@ -58,3 +58,35 @@ def test_subtitle_sidecar_replaces_the_video_extension():
 def test_subtitle_sidecar_keeps_dots_inside_the_name():
     assert download.subtitle_sidecar("/lib/Dr. Show - S01E01 - WEBDL - 720p.mp4", "en") \
         == "/lib/Dr. Show - S01E01 - WEBDL - 720p.en.srt"
+
+
+class FakePopen:
+    """ffmpeg stand-in that reports progress on stdout and writes the output."""
+    lines = ["out_time_us=1500000\n", "out_time_us=3000000\n", "progress=end\n"]
+
+    def __init__(self, cmd, **kw):
+        with open(cmd[-1], "wb") as fh:
+            fh.write(b"\0" * 60_000)
+        self.stdout = iter(self.lines)
+        self.stderr = type("E", (), {"read": staticmethod(lambda: "")})()
+        self.returncode = 0
+
+    def wait(self):
+        return 0
+
+
+def test_download_stream_reports_to_a_callback_instead_of_a_bar(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(download.subprocess, "Popen", FakePopen)
+    seen = []
+    out = str(tmp_path / "Show - S01E01 - WEBDL - 720p.mp4")
+    size = download.download_stream("https://cdn/m.m3u8", "https://r/", out, 3.0,
+                                    on_progress=lambda d, t: seen.append((d, t)))
+    assert size == 60_000
+    assert seen == [(1.5, 3.0), (3.0, 3.0), (3.0, 3.0)]
+    assert capsys.readouterr().out == ""  # no bar, no trailing newline
+
+
+def test_download_stream_still_draws_the_bar_by_default(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(download.subprocess, "Popen", FakePopen)
+    download.download_stream("https://cdn/m.m3u8", "https://r/", str(tmp_path / "a.mp4"), 3.0)
+    assert "100.0%" in capsys.readouterr().out

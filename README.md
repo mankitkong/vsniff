@@ -9,15 +9,18 @@ Fullmetal Alchemist Brotherhood - S01E01 - WEBDL - 1080p.mp4
 ```
 
 It works on any streaming page that plays HLS video in a browser. Three sites
-get extra polish (automatic episode numbers, whole-series downloads and, for
-chinaq and dramasq, source selection):
+get extra polish (automatic episode numbers, whole-series downloads, search by
+title and, for chinaq and dramasq, source selection):
 
-| Site | Auto episode # | Notes |
-|------|:---:|-------|
-| **chinaq.net** | ✅ | tries each playback source until one works |
-| **hkanime.com** | ✅ | episode list + streams come from its play-api |
-| **dramasq.io** | ✅ | tries each playback source until one works; no browser needed |
-| **any other site** | — | works too; you supply `--episode` |
+| Site | Auto episode # | Search | Notes |
+|------|:---:|:---:|-------|
+| **chinaq.net** | ✅ | ✅ | tries each playback source until one works; recent shows only |
+| **hkanime.com** | ✅ | ✅ | Cantonese-dubbed anime; episode list + streams come from its play-api |
+| **dramasq.io** | ✅ | ✅ | tries each playback source until one works; deep back catalogue; no browser needed |
+| **any other site** | — | — | works too; you supply `--episode` |
+
+Don't have the page URL yet? [`vsniff search`](#finding-a-show-vsniff-search)
+looks a title up on all three sites.
 
 ---
 
@@ -118,11 +121,11 @@ The basic form:
 
 ```bash
 ./.venv/bin/vsniff \
-  "https://chinaq.net/video/68261-7.html#sid=9" \
-  --series "Blossoms of Power" --season 1
+  "https://chinaq.net/video/1104-7.html#sid=3" \
+  --series "Tigers Sniff the Rose" --season 1
 ```
 
-→ `Blossoms of Power - S01E07 - WEBDL - 1080p.mp4`
+→ `Tigers Sniff the Rose - S01E07 - WEBDL - 1080p.mp4`
 
 ### hkanime.com
 
@@ -156,6 +159,38 @@ so provide it:
 ./.venv/bin/vsniff "<page url>" --series "Some Show" --episode 3
 ```
 
+### Finding a show (`vsniff search`)
+
+Look a title up on every supported site and get page URLs to download from:
+
+```bash
+./.venv/bin/vsniff search 长相思
+```
+
+```
+dramasq  長相思 第二季  [第23集]
+         https://dramasq.io/detail/202458112.html
+dramasq  長相思 第一季
+         https://dramasq.io/detail/202389894.html
+2 result(s)
+```
+
+The part in `[brackets]` is the site's own status: episodes so far
+(`第23集`, `更新至34集`), a finished count (`全集完 共50集`) or `劇場版` for a
+movie. Any result URL works with `--all`. Add `--site chinaq` (repeatable) to
+search only some sites.
+
+Each site matches its own spelling, so if a title doesn't turn up:
+
+- **Try both scripts.** dramasq matches simplified reliably (庆余年) but
+  traditional only sometimes (慶餘年); chinaq only matches traditional.
+- **Try a shorter piece.** chinaq spells some characters with rare variants
+  (晚鞦寄情 for 晚秋寄情), so the full title misses where `寄情` hits.
+- **Try the Hong Kong name** on hkanime, which can differ entirely from the
+  mainland one (間諜家家酒, not 間諜過家家), or the English/romaji name.
+- **A result can have nothing left to play.** dramasq keeps pages for shows it
+  has taken down (長相思 第一季 above); `--all` then reports no episodes.
+
 ### While it downloads
 
 You'll see a live progress bar:
@@ -165,6 +200,9 @@ You'll see a live progress bar:
 ```
 
 ### All options
+
+(For searching, see [`vsniff search`](#finding-a-show-vsniff-search) above;
+`vsniff search -h` lists its two options.)
 
 | Option | Required? | Default | Meaning |
 |--------|-----------|---------|---------|
@@ -316,8 +354,8 @@ rest. One episode failing doesn't stop the others.
 
 # chinaq — from episode 7 onwards, forcing a source
 ./.venv/bin/vsniff \
-  "https://chinaq.net/video/68261-7.html#sid=9" \
-  --series "Blossoms of Power" --all --from 7 --out ~/Movies/Blossoms
+  "https://chinaq.net/video/1104-7.html#sid=3" \
+  --series "Tigers Sniff the Rose" --all --from 7 --out ~/Movies/TigersSniffTheRose
 ```
 
 `--out` is required with `--all`, and re-running the same command is safe: it
@@ -361,7 +399,10 @@ request goes by, it captures:
 
 - the real `.m3u8` URL (with its token),
 - the exact **referer** the browser sent (which the CDN requires),
-- the **resolution** and **total length**, read from the playlist.
+- the **resolution** and **total length**, read from the playlist. When a
+  single-quality playlist doesn't state its resolution (common on dramasq),
+  `ffprobe` reads it from the first chunk instead — a second or two, not a
+  download.
 
 It never guesses tokens or headers — it observes the real ones the browser
 produces. This is why it's site-agnostic: any page that plays HLS in a
@@ -408,6 +449,9 @@ page URL ─▶ [ browser: (try sources,) sniff the network ]
 | `command not found: brew` | Close and reopen Terminal, or re-run Homebrew's PATH lines. |
 | `no working source found` / `no stream found` | Every source was dead, or the page needs interaction. Open it in a normal browser to confirm it plays, then retry. Try `--show` to watch. |
 | `could not auto-detect the episode number` | The site has no adapter — add `--episode N`. |
+| `vsniff search` finds nothing | Try the other script (simplified/traditional), a shorter piece of the title, or the Hong Kong/English name — see [Finding a show](#finding-a-show-vsniff-search). |
+| `dramasq lists no numbered episodes` for a search result | The show was taken down; dramasq keeps its page but nothing plays. |
+| Filename says `unknown` instead of `720p`/`1080p` | Neither the playlist nor `ffprobe` could tell the resolution; check `ffprobe -version` works. |
 | The `#` in the URL breaks things | Wrap the whole URL in `"double quotes"`. |
 | `ffmpeg: command not found` | `brew install ffmpeg` again. |
 | `.venv/bin/vsniff: No such file or directory` | Your setup predates the `vsniff` command (it used to be `python vsniff.py`). Run `./.venv/bin/pip install -e .` once. |
@@ -420,24 +464,55 @@ vsniff is a small Python package:
 
 ```
 vsniff/
-  cli.py          argument parsing; single-episode, --all and movie flows
+  api.py          using vsniff from Python: search, Session (catalog/probe/download)
+  cli.py          argument parsing; single-episode, --all, movie and search flows
   discovery.py    find one stream using a browser session
   sniff.py        capture an .m3u8 from a page's network traffic
-  playlist.py     resolution / length / subtitles; serves ad-stripped copies
+  playlist.py     resolution (ffprobe fallback) / length / subtitles; ad-stripped copies
   ads.py          spliced-in ad detection (pure text processing)
-  download.py     ffmpeg download with progress bar; subtitle sidecars
+  download.py     ffmpeg download with progress bar or callback; subtitle sidecars
   naming.py       Sonarr/Jellyfin filenames; what's already on disk
-  common.py       user agent, VsniffError, URL helpers
+  common.py       user agent, VsniffError, URL and text helpers
   sites/          one adapter per site, plus GenericSite (the fallback)
 tests/            one test file per module
 ```
 
 **Adding a site:** create `vsniff/sites/<site>.py` with a subclass of
 `GenericSite` (see `base.py` for the methods you can override: `matches`,
-`episode`, `discover`, and `catalog` + `supports_batch = True` for `--all`).
+`episode`, `discover`, `catalog` + `supports_batch = True` for `--all`, and
+`search` + `supports_search = True` for `vsniff search`). Keep each site's
+parsing in a plain function over the page text (`parse_search`,
+`parse_episodes`) so it can be tested without the network.
 Then add an instance to `ADAPTERS` in `vsniff/sites/__init__.py`, ahead of
 `GenericSite()`. `dramasq.py` is a good template for a site with several
 sources per episode; `hkanime.py` for one with a single stream per episode.
+
+**Using vsniff from Python:** `vsniff.api` exposes what the CLI does, for a
+program that drives vsniff (such as a service feeding Sonarr):
+
+```python
+from vsniff import api
+
+results = api.search("尚公主")                     # [SearchResult(site, title, url, note, episodes)]
+with api.Session() as s:                          # one headless browser, reused
+    episodes = s.catalog(results[0].url)          # [(episode, page_url)]
+    info = s.probe(episodes[0][1])                # StreamInfo(source, resolution, duration, subtitles)
+    done = s.download_episode(
+        episodes[0][1], "/media/downloads",
+        series="Tigers Sniff the Rose", season=1, episode=episodes[0][0],
+        on_progress=lambda done_s, total_s: print(done_s, total_s))
+    print(done.path, done.resolution, done.subtitles_path)
+```
+
+- `search()` asks every searchable site and skips (and logs) one that fails,
+  so a site being down doesn't lose the others' results.
+- `probe()` finds the working stream and reports its quality without
+  downloading, for comparing sources before choosing one.
+- `download_episode()` names the file from the stream's real resolution and
+  returns the path; `on_progress(done_seconds, total_seconds)` replaces the
+  terminal progress bar (`total_seconds` may be `None`).
+- A `Session` starts its browser on first use. Playwright is single-threaded:
+  give each worker thread its own `Session`. Errors raise `VsniffError`.
 
 **Running the tests:**
 

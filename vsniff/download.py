@@ -58,8 +58,14 @@ def save_subtitles(sub_url, referer, video_path, lang):
     return out_path
 
 
-def download_stream(m3u8, referer, out_path, duration=None):
-    """Download the full stream to out_path with ffmpeg, showing a progress bar."""
+def download_stream(m3u8, referer, out_path, duration=None, on_progress=None):
+    """Download the full stream to out_path with ffmpeg.
+
+    Progress goes to a terminal bar, or, when on_progress is given, to
+    on_progress(done_seconds, total_seconds) instead (total may be None when
+    the length is unknown) — e.g. for a service reporting a queue.
+    """
+    report = on_progress or _render_bar
     cmd = ["ffmpeg", "-y", "-headers", _headers(referer), "-i", m3u8,
            "-c", "copy", "-movflags", "+faststart",
            "-loglevel", "error", "-progress", "pipe:1", "-nostats", out_path]
@@ -72,11 +78,12 @@ def download_stream(m3u8, referer, out_path, duration=None):
             val = line.split("=", 1)[1]
             if val.isdigit():
                 done_s = int(val) / 1_000_000
-                _render_bar(done_s, duration)
+                report(done_s, duration)
         elif line == "progress=end":
-            _render_bar(duration or done_s, duration)
+            report(duration or done_s, duration)
     proc.wait()
-    sys.stdout.write("\n")
+    if on_progress is None:
+        sys.stdout.write("\n")
     stderr = proc.stderr.read()
     if proc.returncode != 0:
         raise VsniffError("ffmpeg failed:\n" + stderr[-1500:])

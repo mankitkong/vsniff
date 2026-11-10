@@ -10,6 +10,19 @@ class VsniffError(Exception):
     """User-facing failure."""
 
 
+INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
+
+
+def clean_text(s):
+    """Strip zero-width characters and collapse whitespace.
+
+    Site titles carry invisible characters (chinaq lists 尚公主 wrapped in
+    U+200B zero-width spaces next to a plain 尚公主), which would otherwise
+    make equal titles compare unequal.
+    """
+    return " ".join((s or "").translate(INVISIBLE).split())
+
+
 def origin_of(url):
     pr = urlparse(url)
     return f"{pr.scheme}://{pr.netloc}"

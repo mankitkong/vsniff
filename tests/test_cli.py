@@ -96,3 +96,21 @@ def test_movie_all_requires_out(monkeypatch, capsys):
     rc = cli.main([MOVIE_URL, "--title", "X", "--movie", "--all"])
     assert rc == 1
     assert "requires --out" in capsys.readouterr().err
+
+
+def test_search_command_lists_results(monkeypatch, capsys):
+    from vsniff import api
+    from vsniff.sites import SearchResult
+    seen = {}
+
+    def search(query, sites=None):
+        seen.update(query=query, sites=sites)
+        return [SearchResult("dramasq", "長相思 第二季", "https://dramasq.io/detail/1.html",
+                             "第23集", 23)]
+
+    monkeypatch.setattr(api, "search", search)
+    assert cli.main(["search", "長相思", "--site", "dramasq"]) == 0
+    out = capsys.readouterr().out
+    assert "長相思 第二季  [第23集]" in out and "https://dramasq.io/detail/1.html" in out
+    assert "1 result(s)" in out
+    assert seen == {"query": "長相思", "sites": ["dramasq"]}
