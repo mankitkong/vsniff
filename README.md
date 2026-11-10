@@ -8,14 +8,15 @@ quality, and saves a clean `.mp4` named the Sonarr/Jellyfin way:
 Fullmetal Alchemist Brotherhood - S01E01 - WEBDL - 1080p.mp4
 ```
 
-It works on any streaming page that plays HLS video in a browser. Two sites
-get extra polish (automatic episode numbers and, for chinaq, source
-selection):
+It works on any streaming page that plays HLS video in a browser. Three sites
+get extra polish (automatic episode numbers, whole-series downloads and, for
+chinaq and dramasq, source selection):
 
 | Site | Auto episode # | Notes |
 |------|:---:|-------|
 | **chinaq.net** | ✅ | tries each playback source until one works |
 | **hkanime.com** | ✅ | episode list + streams come from its play-api |
+| **dramasq.io** | ✅ | tries each playback source until one works; no browser needed |
 | **any other site** | — | works too; you supply `--episode` |
 
 ---
@@ -134,6 +135,18 @@ The basic form:
 → `Fullmetal Alchemist Brotherhood - S01E01 - WEBDL - 720p.mp4`
 (the `x0` in the URL is the first episode → E01)
 
+### dramasq.io
+
+```bash
+./.venv/bin/python vsniff.py \
+  "https://dramasq.io/vodplay/202614591/ep1.html" \
+  --series "Fall in Love with the Moon" --season 1 --source SYun
+```
+
+→ `Fall in Love with the Moon - S01E01 - WEBDL - 720p.mp4`
+(the `ep1` in the URL is the episode number; `--source` is optional, see
+[dramasq sources](#dramasq-sources---source))
+
 ### Any other site
 
 vsniff will still sniff and download; it just can't guess the episode number,
@@ -158,11 +171,11 @@ You'll see a live progress bar:
 | `url` | ✅ | — | The video page URL |
 | `--series` / `--title` | ✅ | — | English show or movie title (used in the filename) |
 | `--season` | | `1` | Season number |
-| `--episode` | | auto | Episode number (auto for chinaq/hkanime; required elsewhere) |
+| `--episode` | | auto | Episode number (auto for chinaq/hkanime/dramasq; required elsewhere) |
 | `--quality` | | `WEBDL` | Quality tag in the filename |
-| `--source` | | auto | **chinaq only:** force a source by number (`9`) or name (`ZYun`) |
+| `--source` | | auto | **chinaq/dramasq:** force a source by number (`9`) or name (`ZYun`) |
 | `--out` | | `.` (here) | Folder to save into; supports `~` and `$VARS`, e.g. `--out ~/Movies` |
-| `--all` | | off | Download every episode of the series (chinaq/hkanime; needs `--out`) |
+| `--all` | | off | Download every episode of the series (chinaq/hkanime/dramasq; needs `--out`) |
 | `--from` | | — | With `--all`: start at episode N and keep going |
 | `--sub-lang` | | `zh` | Language code for the `.srt` sidecar |
 | `--movie` | | auto | Name it as a movie (automatic for hkanime movie entries) |
@@ -178,6 +191,26 @@ named `BYun`, `ZYun`, …). Some are dead at any time.
 - **Do nothing** → vsniff tries each until one plays (honoring a `#sid=N` in
   your URL first).
 - **Force one** → `--source 9` (number) or `--source ZYun` (name, any case).
+
+### dramasq sources (`--source`)
+
+dramasq works the same way, with more sources per episode (often 8–12,
+片源1 … 片源12). Several of them are reliably dead (403/404) at any time, so
+vsniff checks each one in order and takes the first that answers.
+
+- **Do nothing** → first working source, in the site's order.
+- **Force one** → `--source 10` (number) or `--source SYun` (name). Two
+  sources can share a name (e.g. two `JYun`s on different servers); a name
+  picks the first, so use the number to reach the other.
+
+The sources differ in quality — on the episodes checked, `SYun` carried a
+1920×800 stream at about twice the bitrate of the default — so it can be
+worth forcing one.
+
+dramasq only numbers regular episodes (`.../ep7.html`). Specials (`sp`), a
+`zheng_pian` (正片, "full feature") entry and daily shows keyed by date
+(`.../20261110.html`) still download, but need `--episode N` (or `--movie`),
+and `--all` skips them.
 
 hkanime has one stream per episode (its URL is `<seriesId>x<episodeIndex>` —
 `120x0` is the first episode of series 120), so `--source` isn't used there.
@@ -242,11 +275,14 @@ Which sites have them:
 |------|--------------------------|
 | **hkanime.com** | Sometimes — roughly 4 in 10 series carry one |
 | **chinaq.net** | No — subtitles are burned into the picture, so there's nothing to save |
+| **dramasq.io** | Not seen so far — subtitles are burned into the picture |
 
 ### Spliced-in ads
 
-Some chinaq sources splice ~15–20s gambling ads into the middle of the video
-itself (seen on DYun and Uyun). vsniff removes them before downloading and
+Some chinaq and dramasq sources splice ~15–20s gambling ads into the middle of
+the video itself (seen on chinaq's DYun and Uyun, and dramasq's MYun and YYun).
+dramasq and chinaq share many of the same upstream servers, so a source with
+ads on one usually has them on the other too. vsniff removes them before downloading and
 says so:
 
 ```
@@ -273,6 +309,11 @@ rest. One episode failing doesn't stop the others.
   --series "Fullmetal Alchemist Brotherhood" --season 1 \
   --all --out ~/Movies/FMAB
 
+# dramasq — every episode
+./.venv/bin/python vsniff.py \
+  "https://dramasq.io/detail/202614591.html" \
+  --series "Fall in Love with the Moon" --all --out ~/Movies/FallInLove
+
 # chinaq — from episode 7 onwards, forcing a source
 ./.venv/bin/python vsniff.py \
   "https://chinaq.net/video/68261-7.html#sid=9" \
@@ -281,6 +322,10 @@ rest. One episode failing doesn't stop the others.
 
 `--out` is required with `--all`, and re-running the same command is safe: it
 picks up where it left off. Add `--from N` to skip everything before episode N.
+
+dramasq's series page can trail the site by an episode or two; vsniff also
+checks for newer episodes past the last one listed, so it can pick up episodes
+the series page doesn't link to yet.
 
 Episode numbers come from the site's own labels, so a series that starts
 part-way through a long run (hkanime's One Piece opens at EP517) is named
@@ -301,8 +346,8 @@ Two complications these sites add, which vsniff handles automatically:
 1. **The stream URL is hidden and protected.** The link is tokened and only
    works when requested by the real player, with the exact "referer" header
    the site sends. You can't just read it off the page.
-2. **The right stream may be behind one of several sources.** On chinaq the
-   default source is often dead and a different tab works.
+2. **The right stream may be behind one of several sources.** On chinaq and
+   dramasq the default source is often dead and a different tab works.
 
 vsniff works in two stages:
 
@@ -332,8 +377,10 @@ progress, which vsniff renders as a live bar against the known total length.
 ### Site adapters
 
 The sniff core is generic. Small **adapters** add per-site conveniences —
-extracting the episode number from the URL and, for chinaq, enumerating and
-trying sources. A site with no adapter still works; you just pass `--episode`.
+extracting the episode number from the URL, listing a series' episodes and,
+for chinaq and dramasq, enumerating and trying sources. Where a site has an
+API that hands over the stream directly (hkanime's play-api, dramasq's `/drq`
+endpoint), the adapter uses it and only falls back to sniffing if it fails. A site with no adapter still works; you just pass `--episode`.
 Adding a new site is a small adapter class in `vsniff.py`.
 
 ### The pipeline at a glance
