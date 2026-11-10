@@ -4,7 +4,7 @@
 FROM mcr.microsoft.com/playwright/python:v1.61.0-noble
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg python3-venv \
+ && apt-get install -y --no-install-recommends ffmpeg python3-venv tzdata \
  && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv /opt/vsniff
