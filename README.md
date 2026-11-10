@@ -71,11 +71,11 @@ ffmpeg -version        # expect: ffmpeg version ...
 
 ### Step 3 — Go into the project folder
 
-Open Terminal inside the folder that contains `vsniff.py` (the one this
-README is in). For example, if it's in your home folder:
+Open Terminal inside the project folder (the one this README is in, which
+contains `pyproject.toml` and a `vsniff` folder). For example, if it's in your home folder:
 
 ```bash
-cd ~/chinaq-dl        # the folder name may differ; it's wherever vsniff.py lives
+cd ~/vsniff        # the folder name may differ; it's wherever this README lives
 ```
 
 Every command below assumes you're in that folder. Get back to it any time
@@ -89,14 +89,14 @@ needed:
 
 ```bash
 python3 -m venv .venv                          # create the private workspace
-./.venv/bin/pip install -r requirements.txt    # install Playwright
+./.venv/bin/pip install -e .                   # install vsniff and Playwright
 ./.venv/bin/playwright install chromium        # download the automated browser (~100MB)
 ```
 
 ### Step 5 — Confirm it's ready
 
 ```bash
-./.venv/bin/python vsniff.py -h
+./.venv/bin/vsniff -h
 ```
 
 If you see a help message, setup is complete. 🎉
@@ -108,7 +108,7 @@ If you see a help message, setup is complete. 🎉
 The basic form:
 
 ```bash
-./.venv/bin/python vsniff.py "<PAGE_URL>" --series "<Show Name>" --season <N>
+./.venv/bin/vsniff "<PAGE_URL>" --series "<Show Name>" --season <N>
 ```
 
 > **Always wrap the URL in "quotes"** — the `#` and special characters in
@@ -117,7 +117,7 @@ The basic form:
 ### chinaq.net
 
 ```bash
-./.venv/bin/python vsniff.py \
+./.venv/bin/vsniff \
   "https://chinaq.net/video/68261-7.html#sid=9" \
   --series "Blossoms of Power" --season 1
 ```
@@ -127,7 +127,7 @@ The basic form:
 ### hkanime.com
 
 ```bash
-./.venv/bin/python vsniff.py \
+./.venv/bin/vsniff \
   "https://www.hkanime.com/play/鋼之鍊金術師FA/120x0" \
   --series "Fullmetal Alchemist Brotherhood" --season 1
 ```
@@ -138,7 +138,7 @@ The basic form:
 ### dramasq.io
 
 ```bash
-./.venv/bin/python vsniff.py \
+./.venv/bin/vsniff \
   "https://dramasq.io/vodplay/202614591/ep1.html" \
   --series "Fall in Love with the Moon" --season 1 --source SYun
 ```
@@ -153,7 +153,7 @@ vsniff will still sniff and download; it just can't guess the episode number,
 so provide it:
 
 ```bash
-./.venv/bin/python vsniff.py "<page url>" --series "Some Show" --episode 3
+./.venv/bin/vsniff "<page url>" --series "Some Show" --episode 3
 ```
 
 ### While it downloads
@@ -222,7 +222,7 @@ episodes. vsniff spots these automatically and names them as movies instead of
 numbering them into a season:
 
 ```bash
-./.venv/bin/python vsniff.py \
+./.venv/bin/vsniff \
   "https://www.hkanime.com/play/百變小櫻 相約在香港 /357" \
   --title "Cardcaptor Sakura The Movie" --year 1999 --out ~/media/movies
 ```
@@ -304,18 +304,18 @@ rest. One episode failing doesn't stop the others.
 
 ```bash
 # hkanime — every episode
-./.venv/bin/python vsniff.py \
+./.venv/bin/vsniff \
   "https://www.hkanime.com/play/鋼之鍊金術師FA/120x0" \
   --series "Fullmetal Alchemist Brotherhood" --season 1 \
   --all --out ~/Movies/FMAB
 
 # dramasq — every episode
-./.venv/bin/python vsniff.py \
+./.venv/bin/vsniff \
   "https://dramasq.io/detail/202614591.html" \
   --series "Fall in Love with the Moon" --all --out ~/Movies/FallInLove
 
 # chinaq — from episode 7 onwards, forcing a source
-./.venv/bin/python vsniff.py \
+./.venv/bin/vsniff \
   "https://chinaq.net/video/68261-7.html#sid=9" \
   --series "Blossoms of Power" --all --from 7 --out ~/Movies/Blossoms
 ```
@@ -381,7 +381,9 @@ extracting the episode number from the URL, listing a series' episodes and,
 for chinaq and dramasq, enumerating and trying sources. Where a site has an
 API that hands over the stream directly (hkanime's play-api, dramasq's `/drq`
 endpoint), the adapter uses it and only falls back to sniffing if it fails. A site with no adapter still works; you just pass `--episode`.
-Adding a new site is a small adapter class in `vsniff.py`.
+Adding a new site means writing one adapter module in `vsniff/sites/` and
+listing it in `ADAPTERS` in `vsniff/sites/__init__.py` (see
+[For developers](#for-developers)).
 
 ### The pipeline at a glance
 
@@ -408,6 +410,45 @@ page URL ─▶ [ browser: (try sources,) sniff the network ]
 | `could not auto-detect the episode number` | The site has no adapter — add `--episode N`. |
 | The `#` in the URL breaks things | Wrap the whole URL in `"double quotes"`. |
 | `ffmpeg: command not found` | `brew install ffmpeg` again. |
+| `.venv/bin/vsniff: No such file or directory` | Your setup predates the `vsniff` command (it used to be `python vsniff.py`). Run `./.venv/bin/pip install -e .` once. |
+
+---
+
+## For developers
+
+vsniff is a small Python package:
+
+```
+vsniff/
+  cli.py          argument parsing; single-episode, --all and movie flows
+  discovery.py    find one stream using a browser session
+  sniff.py        capture an .m3u8 from a page's network traffic
+  playlist.py     resolution / length / subtitles; serves ad-stripped copies
+  ads.py          spliced-in ad detection (pure text processing)
+  download.py     ffmpeg download with progress bar; subtitle sidecars
+  naming.py       Sonarr/Jellyfin filenames; what's already on disk
+  common.py       user agent, VsniffError, URL helpers
+  sites/          one adapter per site, plus GenericSite (the fallback)
+tests/            one test file per module
+```
+
+**Adding a site:** create `vsniff/sites/<site>.py` with a subclass of
+`GenericSite` (see `base.py` for the methods you can override: `matches`,
+`episode`, `discover`, and `catalog` + `supports_batch = True` for `--all`).
+Then add an instance to `ADAPTERS` in `vsniff/sites/__init__.py`, ahead of
+`GenericSite()`. `dramasq.py` is a good template for a site with several
+sources per episode; `hkanime.py` for one with a single stream per episode.
+
+**Running the tests:**
+
+```bash
+./.venv/bin/pip install -e ".[dev]"
+./.venv/bin/python -m pytest
+```
+
+When a test stubs out a function, patch it on the module that *calls* it
+(e.g. `monkeypatch.setattr(dramasq, "sniff_once", ...)`, not on
+`vsniff.sniff`), since each module imports the names it uses.
 
 ---
 

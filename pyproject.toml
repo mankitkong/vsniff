@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vsniff"
+version = "0.2.0"
+description = "Sniff and download a streaming video as a Sonarr/Jellyfin-named MP4."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["playwright>=1.40"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]  # unit tests for the pure helpers
+
+[project.scripts]
+vsniff = "vsniff.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["vsniff*"]
